@@ -2,438 +2,48 @@
 #include "packet.h"
 #include <Wire.h>
 #include "MS5837.h"
-#include <avr/interrupt.h>
-MS5837 sensor;
-
-#include "sbus.h"
-bfs::SbusRx sbus_rx(&Serial2);
-bfs::SbusData data;
-
 #include <SPI.h>
 #include <SD.h>
+#include <Servo.h>
+
+/*
+ * 当前保持为台架接收测试模式：
+ * - 只初始化 USB 和 315 MHz 接收器；
+ * - 不初始化传感器、SD、ESC 或舵机；
+ * - 不使用 Serial2，也不向 PX4 发送数据。
+ *
+ * 完成手柄通道映射和动力安全检查前不要改为 0。
+ */
+#define RX315_BENCH_TEST_ONLY 1
+
+MS5837 sensor;
+
 String SDdata = "";
 File dataFile;
 String FileName = "12101.txt";
 
-int PWM = 1550;
-float Depth_d = 0.3;
-float dive_time = 10;
-float depth_bound = 0.1;
-
-#include<Servo.h>
-Servo esc1, esc2, esc3, esc4, servo_left, servo_right; //1234前后左右
+Servo esc1;
+Servo esc2;
+Servo esc3;
+Servo esc4;
+Servo servo_left;
+Servo servo_right;
 
 float Depth = 0;
 float Depth0 = 0;
-int delay1 = 1000;
-int SD1 = 1000;
-int roll = 1500; int pitch = 1500;
-int throttle = 1000; int yaw = 1500;
-int sign = 1500; int sign_last = 1500;
-int depth_key = 1000; int time_key = 1000;
-int print1 = 1000; int servo_key = 1000;
-int roll_315 = 1000; int pitch_315 = 1000;
-float Arduino_Start = millis();
-float phi = 0; float the = 0; float psi = 0; float az = 0;
-float psi_d = 0; float the_d = 0; float psi_d0 = 0; float depth_d = 0; float depth_d_315 = 0;
-
-unsigned long sbus_time = 0;
-unsigned long time_now = 0;
-
-byte SD_key = 1;
-bool stop_flag = 0;
-float d_att[4] = {0, 0, 0, 0};
-float errSum_yaw = 0;
-float errSum[4] = {0, 0, 0, 0};
 float Temp = 0;
 
-uint16_t keylast;
-uint16_t u1rcvbuf[5];
-uint8_t num1;
-unsigned long cmu_num = 0;//通信次数
-unsigned long cmu_num_last = 0;//1s前的通信次数
-unsigned long cmu_time = 0; //通信时间
-byte Is315Receive = 0;
-byte IsRadioReceive = 0;
+int roll_315 = 1500;
+int pitch_315 = 1500;
+float depth_d_315 = 0;
 
-struct {
-  int16_t ale;//-2048~2048
-  int16_t ele;//-2048~2048
-  float d_depth;
-  int8_t updown;
-} control;
+float phi = 0;
+float the = 0;
+float psi = 0;
+float d_att[4] = {0, 0, 0, 0};
 
-/*
- * 315 MHz receiver diagnostic mode
- *
- * The current receiver has only V3.3/GND/OUT.  OUT is connected to Mega
- * D15 (RX3/PJ0).  The bytes previously observed on Serial3 did not contain
- * a valid UART frame, so this mode samples the raw OUT waveform instead of
- * treating it as a 4800-baud UART.
- *
- * While this is 1, setup() returns before SD, Bar30, ESC, servo, Serial2 and
- * Serial3 are initialised.  Consequently this diagnostic cannot drive a
- * motor.  Set it to 0 only after the radio protocol has been identified and
- * a real decoder has been added.
- */
-#define RX315_RAW_CAPTURE_MODE 0
-#define RX315_UART_PROBE_MODE  0
-#define RX315_PROTOCOL_TEST_MODE 1
-#define RX315_CAPTURE_SAMPLES  160
-#define RX315_CAPTURE_TIMEOUT_MS 2000UL
-
-#if RX315_RAW_CAPTURE_MODE
-const uint8_t RX315_OUT_PIN = 15;       // Mega D15 = PJ0 = RXD3 = PCINT9
-
-volatile uint16_t rx315_pulse_us[RX315_CAPTURE_SAMPLES];
-volatile uint8_t rx315_level_after_edge[RX315_CAPTURE_SAMPLES];
-volatile uint8_t rx315_sample_count = 0;
-volatile bool rx315_capture_armed = false;
-volatile bool rx315_capture_complete = false;
-volatile bool rx315_seen_first_edge = false;
-volatile uint32_t rx315_last_edge_us = 0;
-volatile uint32_t rx315_edge_overflow = 0;
-uint32_t rx315_capture_started_ms = 0;
-
-// Called by the PCINT1 interrupt for every rising or falling edge on D15.
-// Keep this short: printing and protocol decoding must never run in an ISR.
-ISR(PCINT1_vect) {
-  if (!rx315_capture_armed) {
-    return;
-  }
-
-  const uint32_t now_us = micros();
-  const uint8_t level = (PINJ & _BV(PJ0)) ? 1 : 0;
-
-  if (!rx315_seen_first_edge) {
-    rx315_seen_first_edge = true;
-    rx315_last_edge_us = now_us;
-    return;
-  }
-
-  const uint32_t width_us = now_us - rx315_last_edge_us;
-  rx315_last_edge_us = now_us;
-
-  if (rx315_sample_count < RX315_CAPTURE_SAMPLES) {
-    rx315_pulse_us[rx315_sample_count] =
-      (width_us > 65535UL) ? 65535U : (uint16_t)width_us;
-    rx315_level_after_edge[rx315_sample_count] = level;
-    rx315_sample_count++;
-  } else {
-    rx315_edge_overflow++;
-  }
-
-  if (rx315_sample_count >= RX315_CAPTURE_SAMPLES) {
-    rx315_capture_armed = false;
-    rx315_capture_complete = true;
-  }
-}
-
-void rx315StartCapture() {
-  noInterrupts();
-  rx315_sample_count = 0;
-  rx315_edge_overflow = 0;
-  rx315_seen_first_edge = false;
-  rx315_capture_complete = false;
-  rx315_capture_armed = true;
-  // Clear a pending pin-change flag before opening the capture window.
-  PCIFR |= _BV(PCIF1);
-  interrupts();
-  rx315_capture_started_ms = millis();
-
-  Serial.println(F("RX315_CAPTURE,armed=1,samples=160,timeout_ms=2000"));
-}
-
-void rx315InitPulseCapture() {
-  pinMode(RX315_OUT_PIN, INPUT);  // no pull-up: do not alter the receiver OUT level
-
-  // Mega D15 is PJ0 / PCINT9. PCINT9 is PCMSK1 bit 1 and uses PCINT1_vect.
-  PCMSK1 |= _BV(PCINT9);
-  PCIFR |= _BV(PCIF1);
-  PCICR |= _BV(PCIE1);
-
-  Serial.println(F("RX315_RAW_MODE,D15=PCINT9,UART3=disabled"));
-  Serial.println(F("RX315_RAW_MODE,send 'c' in Serial Monitor, then move one stick"));
-  Serial.println(F("RX315_RAW_MODE,output is level_after_edge,width_us; no motors are initialised"));
-}
-
-void rx315PrintCapture() {
-  uint8_t count;
-  uint32_t overflow;
-  noInterrupts();
-  count = rx315_sample_count;
-  overflow = rx315_edge_overflow;
-  rx315_capture_complete = false;
-  interrupts();
-
-  Serial.print(F("RX315_CAPTURE,complete=1,count="));
-  Serial.print(count);
-  Serial.print(F(",overflow="));
-  Serial.println(overflow);
-
-  for (uint8_t i = 0; i < count; ++i) {
-    Serial.print(F("RX315_PULSE,index="));
-    Serial.print(i);
-    Serial.print(F(",level_after_edge="));
-    Serial.print(rx315_level_after_edge[i]);
-    Serial.print(F(",width_us="));
-    Serial.println(rx315_pulse_us[i]);
-  }
-}
-
-void rx315CaptureLoop() {
-  while (Serial.available()) {
-    const char command = (char)Serial.read();
-    if (command == 'c' || command == 'C') {
-      rx315StartCapture();
-    }
-  }
-
-  bool armed;
-  noInterrupts();
-  armed = rx315_capture_armed;
-  interrupts();
-  if (armed && (millis() - rx315_capture_started_ms >= RX315_CAPTURE_TIMEOUT_MS)) {
-    noInterrupts();
-    rx315_capture_armed = false;
-    rx315_capture_complete = true;
-    interrupts();
-  }
-
-  if (rx315_capture_complete) {
-    rx315PrintCapture();
-  }
-}
-#endif
-
-#if RX315_PROTOCOL_TEST_MODE
-/*
- * 315 receiver protocol, verified from captured frames:
- *   00 AD AD AD AD AD FE 10 CRC Data'[12] BD DB BD
- * Data' is XOR-whitened by BD/DB alternation.  This is byte-for-byte the
- * protocol consumed by embedded/uart_telem3.cpp on PX4.
- *
- * This phase is deliberately receive-only. It validates and displays the
- * channels; it neither starts the actuators nor forwards data to PX4.
- */
-#define RX315_PROTOCOL_BAUD 9600UL
-
-const uint8_t RX315_WHITEN[12] = {
-  0xBD, 0xDB, 0xBD, 0xDB, 0xBD, 0xDB,
-  0xBD, 0xDB, 0xBD, 0xDB, 0xBD, 0xDB
-};
-
-enum Rx315ParserState : uint8_t {
-  RX315_WAIT_ZERO,
-  RX315_WAIT_AD,
-  RX315_WAIT_LENGTH,
-  RX315_WAIT_PAYLOAD
-};
-
-Rx315ParserState rx315_parser_state = RX315_WAIT_ZERO;
-uint8_t rx315_ad_count = 0;
-uint8_t rx315_payload[16];       // CRC + Data'[12] + BD DB BD
-uint8_t rx315_payload_index = 0;
-uint32_t rx315_bytes = 0;
-uint32_t rx315_valid_frames = 0;
-uint32_t rx315_crc_errors = 0;
-uint32_t rx315_sync_errors = 0;
-uint32_t rx315_last_valid_ms = 0;
-uint32_t rx315_last_print_ms = 0;
-
-uint8_t rx315Crc8(const uint8_t *data, uint8_t length) {
-  uint8_t crc = 0;
-  while (length--) {
-    crc ^= *data++;
-    for (uint8_t bit = 0; bit < 8; ++bit) {
-      crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
-    }
-  }
-  return crc;
-}
-
-uint32_t rx315ExtractBits(const uint8_t *data, uint8_t start_bit, uint8_t bit_count) {
-  const uint8_t byte_index = start_bit / 8;
-  const uint8_t bit_offset = start_bit % 8;
-  uint32_t raw = data[byte_index];
-  if (byte_index + 1 < 12) raw |= (uint32_t)data[byte_index + 1] << 8;
-  if (byte_index + 2 < 12) raw |= (uint32_t)data[byte_index + 2] << 16;
-  return (raw >> bit_offset) & ((1UL << bit_count) - 1UL);
-}
-
-uint16_t rx315Map11BitToPwm(uint32_t value) {
-  return (uint16_t)(1000UL + (value * 1000UL) / 2047UL);
-}
-
-uint16_t rx315Map6BitToPwm(uint32_t value) {
-  return (uint16_t)(1000UL + (value * 1000UL) / 63UL);
-}
-
-void rx315PrintValidFrame() {
-  uint8_t data[12];
-  uint16_t channel[10];
-  for (uint8_t i = 0; i < 12; ++i) data[i] = rx315_payload[1 + i] ^ RX315_WHITEN[i];
-
-  channel[0] = rx315Map11BitToPwm(rx315ExtractBits(data, 0, 11));
-  channel[1] = rx315Map11BitToPwm(rx315ExtractBits(data, 11, 11));
-  channel[2] = rx315Map11BitToPwm(rx315ExtractBits(data, 22, 11));
-  channel[3] = rx315Map11BitToPwm(rx315ExtractBits(data, 33, 11));
-  channel[4] = rx315Map6BitToPwm(rx315ExtractBits(data, 44, 6));
-  channel[5] = rx315Map6BitToPwm(rx315ExtractBits(data, 50, 6));
-  channel[6] = rx315Map6BitToPwm(rx315ExtractBits(data, 56, 6));
-  channel[7] = rx315Map6BitToPwm(rx315ExtractBits(data, 62, 6));
-  channel[8] = rx315Map6BitToPwm(rx315ExtractBits(data, 68, 6));
-  channel[9] = rx315Map6BitToPwm(rx315ExtractBits(data, 74, 6));
-  const uint16_t sequence = (uint16_t)rx315ExtractBits(data, 80, 11);
-
-  Serial.print(F("RX315_VALID,frames="));
-  Serial.print(rx315_valid_frames);
-  Serial.print(F(",seq="));
-  Serial.print(sequence);
-  Serial.print(F(",ch="));
-  for (uint8_t i = 0; i < 10; ++i) {
-    Serial.print(channel[i]);
-    if (i != 9) Serial.print(',');
-  }
-  Serial.print(F(",crc_errors="));
-  Serial.print(rx315_crc_errors);
-  Serial.print(F(",sync_errors="));
-  Serial.println(rx315_sync_errors);
-}
-
-void rx315HandlePayload() {
-  const bool tail_ok = rx315_payload[13] == 0xBD &&
-                       rx315_payload[14] == 0xDB &&
-                       rx315_payload[15] == 0xBD;
-  const bool crc_ok = rx315Crc8(&rx315_payload[1], 12) == rx315_payload[0];
-  if (!tail_ok || !crc_ok) {
-    rx315_crc_errors++;
-    return;
-  }
-
-  rx315_valid_frames++;
-  rx315_last_valid_ms = millis();
-  // Limit USB output; continuous 9600-baud input must always be drained first.
-  if (millis() - rx315_last_print_ms >= 100) {
-    rx315_last_print_ms = millis();
-    rx315PrintValidFrame();
-  }
-}
-
-void rx315ConsumeByte(uint8_t value) {
-  rx315_bytes++;
-  switch (rx315_parser_state) {
-    case RX315_WAIT_ZERO:
-      if (value == 0x00) rx315_parser_state = RX315_WAIT_AD;
-      break;
-
-    case RX315_WAIT_AD:
-      if (value == 0xAD) {
-        if (rx315_ad_count < 5) rx315_ad_count++;
-      } else if (value == 0xFE && rx315_ad_count >= 3) {
-        rx315_parser_state = RX315_WAIT_LENGTH;
-      } else {
-        rx315_sync_errors++;
-        rx315_ad_count = 0;
-        rx315_parser_state = (value == 0x00) ? RX315_WAIT_AD : RX315_WAIT_ZERO;
-      }
-      break;
-
-    case RX315_WAIT_LENGTH:
-      if (value == 0x10) {
-        rx315_payload_index = 0;
-        rx315_parser_state = RX315_WAIT_PAYLOAD;
-      } else {
-        rx315_sync_errors++;
-        rx315_ad_count = 0;
-        rx315_parser_state = (value == 0x00) ? RX315_WAIT_AD : RX315_WAIT_ZERO;
-      }
-      break;
-
-    case RX315_WAIT_PAYLOAD:
-      rx315_payload[rx315_payload_index++] = value;
-      if (rx315_payload_index == 16) {
-        rx315HandlePayload();
-        rx315_ad_count = 0;
-        rx315_parser_state = RX315_WAIT_ZERO;
-      }
-      break;
-  }
-}
-
-void rx315InitProtocolTest() {
-  Serial3.begin(RX315_PROTOCOL_BAUD);
-  Serial.println(F("RX315_PROTOCOL_TEST,baud=9600,format=8N1,D15=RX3"));
-  Serial.println(F("RX315_PROTOCOL_TEST,CRC/dewhiten/channel display only; no motors or PX4 TX"));
-}
-
-void rx315ProtocolTestLoop() {
-  while (Serial3.available()) rx315ConsumeByte((uint8_t)Serial3.read());
-
-  if (millis() - rx315_last_print_ms >= 1000) {
-    rx315_last_print_ms = millis();
-    Serial.print(F("RX315_STATUS,bytes="));
-    Serial.print(rx315_bytes);
-    Serial.print(F(",valid="));
-    Serial.print(rx315_valid_frames);
-    Serial.print(F(",crc_errors="));
-    Serial.print(rx315_crc_errors);
-    Serial.print(F(",sync_errors="));
-    Serial.print(rx315_sync_errors);
-    Serial.print(F(",last_age_ms="));
-    if (rx315_valid_frames == 0) Serial.println(F("NA"));
-    else Serial.println(millis() - rx315_last_valid_ms);
-  }
-}
-#endif
-
-#if RX315_UART_PROBE_MODE
-/*
- * The pulse capture shows approximately 100-us symbol periods, which is
- * consistent with a 9600-baud UART stream.  This is a receive-only probe:
- * print the bytes in hexadecimal before adding any protocol decoder.
- */
-#define RX315_UART_PROBE_BAUD 9600UL
-#define RX315_UART_PROBE_BATCH 32
-
-uint32_t rx315_uart_total_bytes = 0;
-
-void rx315InitUartProbe() {
-  Serial3.begin(RX315_UART_PROBE_BAUD);
-  Serial.println(F("RX315_UART_PROBE,baud=9600,format=8N1,D15=RX3"));
-  Serial.println(F("RX315_UART_PROBE,receive-only; no motors are initialised"));
-}
-
-void rx315UartProbeLoop() {
-  uint8_t data[RX315_UART_PROBE_BATCH];
-  uint8_t count = 0;
-
-  while (Serial3.available() && count < RX315_UART_PROBE_BATCH) {
-    data[count++] = (uint8_t)Serial3.read();
-    rx315_uart_total_bytes++;
-  }
-
-  if (count == 0) {
-    return;
-  }
-
-  Serial.print(F("RX315_UART,bytes_total="));
-  Serial.print(rx315_uart_total_bytes);
-  Serial.print(F(",count="));
-  Serial.print(count);
-  Serial.print(F(",hex="));
-  for (uint8_t i = 0; i < count; ++i) {
-    if (data[i] < 0x10) {
-      Serial.print('0');
-    }
-    Serial.print(data[i], HEX);
-    if (i + 1 < count) {
-      Serial.print(' ');
-    }
-  }
-  Serial.println();
-}
-#endif
+float errSum[4] = {0, 0, 0, 0};
+unsigned long time_now = 0;
 
 void SDwrite() {
   if (dataFile) {
@@ -441,138 +51,98 @@ void SDwrite() {
   }
   SDdata = "";
 }
-void SDread() {
-  dataFile = SD.open(FileName);
-  if (dataFile)
-  {
-    while (dataFile.available())
-    {
-      Serial.write(dataFile.read());
-    }
-    dataFile.close();
-  }
-  else
-  {
-    Serial.println("error opening test.txt");
-  }
+
+void writeNeutralOutputs() {
+  esc1.writeMicroseconds(1490);
+  esc2.writeMicroseconds(1490);
+  esc3.writeMicroseconds(1490);
+  esc4.writeMicroseconds(1490);
+  servo_left.writeMicroseconds(1000);
+  servo_right.writeMicroseconds(2000);
 }
 
 void setup() {
   Serial.begin(115200);
-#if RX315_RAW_CAPTURE_MODE
-  rx315InitPulseCapture();
-  return;
-#elif RX315_UART_PROBE_MODE
-  rx315InitUartProbe();
-  return;
-#elif RX315_PROTOCOL_TEST_MODE
-  rx315InitProtocolTest();
+  rx315Begin();
+
+#if RX315_BENCH_TEST_ONLY
   return;
 #endif
 
   Serial1.begin(115200);
   imu_data_decode_init();
-  sbus_rx.Begin();
-  Serial3.begin(4800);
-  control.d_depth = 0;
 
   pinMode(53, OUTPUT);
   if (!SD.begin(53)) {
-    Serial.println("SD initialization failed!");
+    Serial.println(F("SD initialization failed!"));
     return;
   }
-  dataFile  = SD.open(FileName, FILE_WRITE);
+  dataFile = SD.open(FileName, FILE_WRITE);
 
   Wire.begin();
   if (!sensor.init()) {
-    Serial.println("Init failed!");
-    Serial.println("Are SDA/SCL connected correctly?");
-    Serial.println("Blue Robotics Bar30: White=SDA, Green=SCL");
-    Serial.println("\n\n\n");
-    //    delay(5000);
+    Serial.println(F("Init failed!"));
+    Serial.println(F("Are SDA/SCL connected correctly?"));
+    Serial.println(F("Blue Robotics Bar30: White=SDA, Green=SCL"));
   }
   sensor.setModel(MS5837::MS5837_30BA);
   sensor.setFluidDensity(1000);
-  //  sensor.setOverSampling(4);
   sensor.read();
   Depth0 = sensor.depth();
 
-
   pinMode(A10, OUTPUT);
   pinMode(A11, OUTPUT);
-  //arduino直接输出arduino给的信号
   digitalWrite(A10, LOW);
   digitalWrite(A11, LOW);
-  esc1.attach(8);//前，>1500逆时针桨正转
-  esc2.attach(10);//后，>1500逆时针桨正转
-  esc3.attach(7);//左，>1500逆时针桨正转
-  esc4.attach(9);//右，>1500顺时针桨正转
-  esc1.writeMicroseconds(1490);
-  esc2.writeMicroseconds(1490);
-  esc3.writeMicroseconds(1490);
-  esc4.writeMicroseconds(1490);
 
-  servo_left.attach(4, 544, 2400);//左
+  // 四个水桨：前、后、左、右。
+  esc1.attach(8);
+  esc2.attach(10);
+  esc3.attach(7);
+  esc4.attach(9);
+
+  servo_left.attach(4, 544, 2400);
   servo_right.attach(6, 544, 2400);
-  servo_left.writeMicroseconds(1000);
-  servo_right.writeMicroseconds(2000);
+  writeNeutralOutputs();
 }
+
 void loop() {
-#if RX315_RAW_CAPTURE_MODE
-  rx315CaptureLoop();
-  return;
-#elif RX315_UART_PROBE_MODE
-  rx315UartProbeLoop();
-  return;
-#elif RX315_PROTOCOL_TEST_MODE
-  rx315ProtocolTestLoop();
+  rx315Update();
+
+#if RX315_BENCH_TEST_ONLY
   return;
 #endif
 
-  phi = id0x91.eul[1]; //y轴向前
+  phi = id0x91.eul[1];
   the = -id0x91.eul[0];
   psi = id0x91.eul[2];
   d_att[0] = id0x91.gyr[1];
   d_att[1] = -id0x91.gyr[0];
   d_att[2] = id0x91.gyr[2];
+
   sensor.read_nodelay();
   if (sensor.check_step() == 3) {
     Depth = sensor.depth() - Depth0;
     Temp = sensor.temperature();
   }
-  if ((millis() - sbus_time) > 1000) {
-    if (!sbus_rx.Read()){
-      IsRadioReceive = 0;
-//      Serial.print("IsRadioReceive: ");Serial.println(IsRadioReceive);
-    }
-  }
-    else {
-      IsRadioReceive = 1;
-//      Serial.print("IsRadioReceive: ");Serial.println(IsRadioReceive);
-  }
-//  Serial.print("Is315Receive: ");Serial.println(Is315Receive);
-  if ((millis() - time_now) >= 50) {
+
+  if (millis() - time_now >= 50) {
     time_now = millis();
-    if ((Is315Receive == 0)&& (IsRadioReceive == 0)){ //315和radio同时开则radio优先级高
-      esc1.writeMicroseconds(1490);
-      esc2.writeMicroseconds(1490);
-      esc3.writeMicroseconds(1490);
-      esc4.writeMicroseconds(1490);
-      servo_left.writeMicroseconds(1000);
-      servo_right.writeMicroseconds(2000);
-    }
-    else if ((Is315Receive == 1) && (IsRadioReceive == 0)) { //Radio关，315遥控，315优先级高
+
+    /*
+     * 当前尚未确认 ch[0]~ch[9] 与手柄操作的对应关系，因此这里不把
+     * rx315Channel() 写入 roll_315/pitch_315。台架模式关闭前必须先完成映射。
+     */
+    if (rx315HasFreshFrame()) {
       Marine_Remote_315();
-    }
-    else if (IsRadioReceive == 1) { //空中、水面遥控，Radio优先级高
-      dataReceived();
+    } else {
+      writeNeutralOutputs();
     }
   }
 }
 
 void serialEvent1() {
   while (Serial1.available()) {
-    uint8_t ch = (uint8_t)Serial1.read();
-    packet_decode(ch);
+    packet_decode((uint8_t)Serial1.read());
   }
 }

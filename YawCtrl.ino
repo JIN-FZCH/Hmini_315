@@ -41,7 +41,7 @@ float *PID_outloop(float error[]) {
   float kp[4] = {1000, 0.2, 15, 5};
   float ki[4] = {5, 0, 0, 0};
   float kd[4] = {1, 0.1, 2, 2};
-  static float output[4] = {0, 0, 0, 0}; //必须是static
+  static float output[4] = {0, 0, 0, 0}; // 必须为 static，返回后数组仍然有效
   float dErr[4] = {0, 0, 0, 0};
   static float depth_[2] = {Depth, 0};
   TD(depth_, Depth);
@@ -56,26 +56,13 @@ float *PID_outloop(float error[]) {
   double timeChange = 0.05;
   for (int i = 0; i < 4; i++) {
     errSum[i] = errSum[i] + (error[i] * timeChange);
-    errSum[i] = constrain(errSum[i], -50/ki[i], 50/ki[i]);
+    if (ki[i] > 0) {
+      errSum[i] = constrain(errSum[i], -50 / ki[i], 50 / ki[i]);
+    } else {
+      errSum[i] = 0;
+    }
     output[i] = kp[i] * error[i] + ki[i] * errSum[i] + kd[i] * dErr[i];
   }
-  lastTime = now;
-  return output;
-}
-
-float PID_Remote(float psi_d, float psi) {
-  float kp = 3;
-  float ki = 0.2;
-  float kd = 1;
-  static unsigned long lastTime = millis() - 50;
-  unsigned long now = millis();
-//  double timeChange = (double)(now - lastTime) / 1000;
-  double timeChange = 0.05;
-  float error = psi_d - psi;
-  errSum_yaw += (error * timeChange);
-  errSum_yaw = constrain(errSum_yaw, -50 / ki, 50 / ki);
-  float dErr = -d_att[2];;
-  float output = kp * error + ki * errSum_yaw + kd * dErr;
   lastTime = now;
   return output;
 }
