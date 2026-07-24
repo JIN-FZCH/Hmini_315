@@ -50,6 +50,7 @@ uint32_t rx315_last_frame_print_ms = 0;
 uint32_t rx315_last_status_print_ms = 0;
 bool rx315_has_valid_frame = false;
 bool rx315_sequence_initialized = false;
+bool rx315_link_connected = false;
 
 uint8_t rx315Crc8(const uint8_t *data, uint8_t length) {
   uint8_t crc = 0;
@@ -135,6 +136,33 @@ void rx315PrintStatus() {
   }
 }
 
+void rx315SetLinkState(bool connected) {
+  if (connected == rx315_link_connected) {
+    return;
+  }
+
+  rx315_link_connected = connected;
+  Serial.print(F("RX315_FLAG,"));
+
+  if (connected) {
+    Serial.print(F("CONNECTED,frames="));
+    Serial.print(rx315_valid_frames);
+    Serial.print(F(",seq="));
+    Serial.println(rx315_sequence);
+  } else {
+    Serial.print(F("DISCONNECTED,last_age_ms="));
+    Serial.print(millis() - rx315_last_valid_ms);
+    Serial.print(F(",valid="));
+    Serial.print(rx315_valid_frames);
+    Serial.print(F(",crc_errors="));
+    Serial.print(rx315_crc_errors);
+    Serial.print(F(",tail_errors="));
+    Serial.print(rx315_tail_errors);
+    Serial.print(F(",sync_errors="));
+    Serial.println(rx315_sync_errors);
+  }
+}
+
 void rx315DecodeData(const uint8_t *wire_data) {
   uint8_t data[12];
 
@@ -196,6 +224,7 @@ void rx315HandlePayload() {
   rx315_valid_frames++;
   rx315_last_valid_ms = millis();
   rx315_has_valid_frame = true;
+  rx315SetLinkState(true);
 
   if (millis() - rx315_last_frame_print_ms >= 100) {
     rx315_last_frame_print_ms = millis();
@@ -265,7 +294,15 @@ void rx315Update() {
     rx315ConsumeByte((uint8_t)Serial3.read());
   }
 
-  if (millis() - rx315_last_status_print_ms >= 1000) {
+  // Receiver noise may continue after the handset is turned off. Only a
+  // recently validated frame keeps the link in the connected state.
+  if (!rx315HasFreshFrame()) {
+    rx315SetLinkState(false);
+  }
+
+  // Do not continuously print parser statistics while disconnected.
+  if (rx315_link_connected &&
+      millis() - rx315_last_status_print_ms >= 1000) {
     rx315_last_status_print_ms = millis();
     rx315PrintStatus();
   }
