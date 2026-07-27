@@ -49,8 +49,14 @@ const uint16_t SBUS_PX4_MIN = 201U;
 const uint16_t SBUS_PX4_MID = 1002U;
 const uint16_t SBUS_PX4_MAX = 1802U;
 const uint32_t SBUS_OUTPUT_PERIOD_MS = 14UL;
+const uint16_t SBUS_FRAME_COUNT_MASK = 0x07FFU;
+const uint32_t SBUS_STATUS_PERIOD_MS = 1000UL;
 
 uint32_t sbus_last_output_ms = 0;
+uint32_t sbus_last_status_ms = 0;
+uint32_t sbus_output_total_frames = 0;
+uint16_t sbus_output_frame_count = 0;
+bool sbus_output_failsafe = true;
 
 uint16_t sbusEncodePwmForPx4(uint16_t pwm, uint16_t pwm_mid) {
   if (pwm <= RX315_PWM_MIN) {
@@ -127,14 +133,45 @@ void sbusSetRx315Data() {
   data.failsafe = false;
 }
 
+/*
+ * Send one complete standard SBUS frame. CH14 carries the 11-bit sequence
+ * counter used by the previous custom 315-to-PX4 protocol. It is diagnostic
+ * metadata, not a PWM-style control channel.
+ */
+void sbusTransmitCurrentData() {
+  sbus_output_frame_count =
+    (sbus_output_frame_count + 1U) & SBUS_FRAME_COUNT_MASK;
+  ++sbus_output_total_frames;
+
+  // SBUS channel 14 is data.ch[13] because the array is zero-indexed.
+  data.ch[13] = sbus_output_frame_count;
+  sbus_tx.data(data);
+  sbus_tx.Write();
+}
+
+void sbusPrintStatus(uint32_t now) {
+  if (now - sbus_last_status_ms < SBUS_STATUS_PERIOD_MS) {
+    return;
+  }
+
+  sbus_last_status_ms = now;
+  Serial.print(F("SBUS_TX_STATUS,frames="));
+  Serial.print(sbus_output_total_frames);
+  Serial.print(F(",seq="));
+  Serial.print(sbus_output_frame_count);
+  Serial.print(F(",failsafe="));
+  Serial.println(sbus_output_failsafe ? 1 : 0);
+}
+
 void sbusOutputBegin() {
   sbusSetFailsafeData();
+  sbus_output_failsafe = true;
   sbus_tx.Begin();
 
   // Send a defined failsafe frame immediately instead of uninitialized data.
-  sbus_tx.data(data);
-  sbus_tx.Write();
+  sbusTransmitCurrentData();
   sbus_last_output_ms = millis();
+  sbus_last_status_ms = sbus_last_output_ms;
 }
 
 void sbusOutputUpdate() {
@@ -146,10 +183,12 @@ void sbusOutputUpdate() {
 
   if (rx315HasFreshFrame()) {
     sbusSetRx315Data();
+    sbus_output_failsafe = false;
   } else {
     sbusSetFailsafeData();
+    sbus_output_failsafe = true;
   }
 
-  sbus_tx.data(data);
-  sbus_tx.Write();
+  sbusTransmitCurrentData();
+  sbusPrintStatus(now);
 }
