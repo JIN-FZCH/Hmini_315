@@ -7,12 +7,12 @@
 #include <Servo.h>
 
 /*
- * 当前保持为台架接收测试模式：
- * - 只初始化 USB 和 315 MHz 接收器；
+ * 当前保持为台架接收和SBUS转发测试模式：
+ * - 初始化 USB、315 MHz 接收器和Serial2 SBUS输出；
+ * - 将315的10个通道转发到PX4；
  * - 不初始化传感器、SD、ESC 或舵机；
- * - 不使用 Serial2，也不向 PX4 发送数据。
  *
- * 完成手柄通道映射和动力安全检查前不要改为 0。
+ * 完成动力安全检查前不要改为 0。
  */
 #define RX315_BENCH_TEST_ONLY 1
 
@@ -64,6 +64,7 @@ void writeNeutralOutputs() {
 void setup() {
   Serial.begin(115200);
   rx315Begin();
+  sbusOutputBegin();
 
 #if RX315_BENCH_TEST_ONLY
   return;
@@ -108,6 +109,7 @@ void setup() {
 
 void loop() {
   rx315Update();
+  sbusOutputUpdate();
 
 #if RX315_BENCH_TEST_ONLY
   return;
@@ -130,8 +132,8 @@ void loop() {
     time_now = millis();
 
     /*
-     * 当前尚未确认 ch[0]~ch[9] 与手柄操作的对应关系，因此这里不把
-     * rx315Channel() 写入 roll_315/pitch_315。台架模式关闭前必须先完成映射。
+     * SBUS转发在sbusOutputUpdate()中独立完成。这里仍未把315通道接入
+     * 水桨控制变量，关闭台架模式前必须另外完成动力映射和安全检查。
      */
     if (rx315HasFreshFrame()) {
       Marine_Remote_315();
