@@ -28,45 +28,72 @@
 /*
  * Arduino Mega Serial2 TX / D16 -> board SOUT -> PX4 RC/SBUS input.
  *
- * The Bolder Flight Systems library expects channel values in the usual
- * SBUS range (172..1811), not PWM microseconds (1000..2000).
+ * The library writes 11-bit SBUS channel codes. These constants encode the
+ * local 315 receiver's PWM-style values so PX4 reports 1000/1500/2000 in
+ * RC_CHANNELS on this hardware.
  */
 bfs::SbusTx sbus_tx(&Serial2);
 bfs::SbusData data;
 
-const uint16_t SBUS_OUTPUT_MIN = 172U;
-const uint16_t SBUS_OUTPUT_MID = 992U;
-const uint16_t SBUS_OUTPUT_MAX = 1811U;
+const uint16_t RX315_PWM_MIN = 1000U;
+const uint16_t RX315_PWM_STICK_MID = 1500U;
+const uint16_t RX315_PWM_AUX_MID = 1492U;
+const uint16_t RX315_PWM_MAX = 2000U;
+
+/*
+ * PX4 calibration points measured with this board and standard SBUS input:
+ *   SBUS 172 -> PX4 982,  SBUS 992 -> PX4 1494,  SBUS 1811 -> PX4 2004.
+ * These compensated codes produce PX4 RC_CHANNELS values near 1000/1500/2000.
+ */
+const uint16_t SBUS_PX4_MIN = 201U;
+const uint16_t SBUS_PX4_MID = 1002U;
+const uint16_t SBUS_PX4_MAX = 1802U;
 const uint32_t SBUS_OUTPUT_PERIOD_MS = 14UL;
 
 uint32_t sbus_last_output_ms = 0;
 
-uint16_t sbusMapRawChannel(uint16_t value, uint16_t input_max) {
-  if (value > input_max) {
-    value = input_max;
+uint16_t sbusEncodePwmForPx4(uint16_t pwm, uint16_t pwm_mid) {
+  if (pwm <= RX315_PWM_MIN) {
+    return SBUS_PX4_MIN;
   }
 
-  const uint32_t output_span = SBUS_OUTPUT_MAX - SBUS_OUTPUT_MIN;
+  if (pwm >= RX315_PWM_MAX) {
+    return SBUS_PX4_MAX;
+  }
+
+  if (pwm <= pwm_mid) {
+    const uint16_t input_span = pwm_mid - RX315_PWM_MIN;
+    const uint16_t output_span = SBUS_PX4_MID - SBUS_PX4_MIN;
+    return (uint16_t)(
+      SBUS_PX4_MIN +
+      ((uint32_t)(pwm - RX315_PWM_MIN) * output_span + input_span / 2U) /
+        input_span
+    );
+  }
+
+  const uint16_t input_span = RX315_PWM_MAX - pwm_mid;
+  const uint16_t output_span = SBUS_PX4_MAX - SBUS_PX4_MID;
   return (uint16_t)(
-    SBUS_OUTPUT_MIN +
-    ((uint32_t)value * output_span + input_max / 2U) / input_max
+    SBUS_PX4_MID +
+    ((uint32_t)(pwm - pwm_mid) * output_span + input_span / 2U) /
+      input_span
   );
 }
 
 void sbusSetFailsafeData() {
   for (uint8_t i = 0; i < data.NUM_CH; ++i) {
-    data.ch[i] = SBUS_OUTPUT_MID;
+    data.ch[i] = SBUS_PX4_MID;
   }
 
   // Safe stick values: roll/pitch/yaw centered and throttle at minimum.
-  data.ch[0] = SBUS_OUTPUT_MID;
-  data.ch[1] = SBUS_OUTPUT_MID;
-  data.ch[2] = SBUS_OUTPUT_MIN;
-  data.ch[3] = SBUS_OUTPUT_MID;
+  data.ch[0] = SBUS_PX4_MID;
+  data.ch[1] = SBUS_PX4_MID;
+  data.ch[2] = SBUS_PX4_MIN;
+  data.ch[3] = SBUS_PX4_MID;
 
   // Put all six used auxiliary channels in their low position.
   for (uint8_t i = 4; i < 10; ++i) {
-    data.ch[i] = SBUS_OUTPUT_MIN;
+    data.ch[i] = SBUS_PX4_MIN;
   }
 
   data.ch17 = false;
@@ -76,18 +103,22 @@ void sbusSetFailsafeData() {
 }
 
 void sbusSetRx315Data() {
-  // The four stick channels have 11-bit source resolution.
+  // Sticks are decoded as 1000/1500/2000 PWM-style values by RX315.ino.
   for (uint8_t i = 0; i < 4; ++i) {
-    data.ch[i] = sbusMapRawChannel(rx315RawChannel(i), 2047U);
+    data.ch[i] = sbusEncodePwmForPx4(
+      rx315Channel(i), RX315_PWM_STICK_MID
+    );
   }
 
-  // The six auxiliary channels have 6-bit source resolution.
+  // Six-bit auxiliary channels use 1492 as their physical centre position.
   for (uint8_t i = 4; i < 10; ++i) {
-    data.ch[i] = sbusMapRawChannel(rx315RawChannel(i), 63U);
+    data.ch[i] = sbusEncodePwmForPx4(
+      rx315Channel(i), RX315_PWM_AUX_MID
+    );
   }
 
   for (uint8_t i = 10; i < data.NUM_CH; ++i) {
-    data.ch[i] = SBUS_OUTPUT_MID;
+    data.ch[i] = SBUS_PX4_MID;
   }
 
   data.ch17 = false;
