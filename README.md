@@ -173,20 +173,18 @@ SBUS_TX_STATUS,frames=...,seq=...,failsafe=0
 ## 🗂️ 仓库结构
 
 ```text
-embedded/
-├─ README.md
-├─ Hmini_315/
-│  ├─ Hmini_315.ino                 主程序入口与台架模式
-│  ├─ RX315.ino                     接收、校验、解扰和通道解析
-│  ├─ sbus.ino                      标准 SBUS 输出与 Failsafe
-│  ├─ WaterControl315.ino            保留的水下动力控制逻辑
-│  ├─ YawCtrl.ino                    姿态、深度 PID 与跟踪微分器
-│  ├─ MS5837.*                       Bar30 深度传感器驱动
-│  ├─ imu_data_decode.* / packet.*   IMU 串口协议解析
-│  ├─ tools/RX315_Diagnostics/       原始脉冲与 UART 诊断草图
-│  ├─ docs/                          详细代码与协议文档
-│  └─ 315/                           STM32 发送端与 PX4 直连驱动参考
-└─ legacy/                           已归档的历史实现
+Hmini_315/
+├─ Hmini_315.ino                  主程序入口与台架模式
+├─ RX315.ino                      接收、校验、解扰和通道解析
+├─ sbus.ino                       标准 SBUS 输出与 Failsafe
+├─ WaterControl315.ino            保留的水下动力控制逻辑
+├─ YawCtrl.ino                    姿态、深度 PID 与跟踪微分器
+├─ MS5837.*                       Bar30 深度传感器驱动
+├─ imu_data_decode.* / packet.*   IMU 串口协议解析
+├─ tools/RX315_Diagnostics/       原始脉冲与 UART 诊断草图
+├─ docs/                          详细代码与协议文档
+├─ 315/                           STM32 发送端与 PX4 直连驱动参考
+└─ README.md
 ```
 
 Arduino IDE 会自动合并 `Hmini_315/` 目录中的所有 `.ino` 文件进行编译；`tools/` 和 `legacy/` 中的文件不会进入主草图构建。
