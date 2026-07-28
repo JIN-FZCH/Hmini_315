@@ -46,8 +46,6 @@ Arduino 负责接收并校验接收器发出的 24 字节数据帧，完成解�
 | Arduino → PX4 标准 SBUS | ✅ | `Serial2`，100000 baud，8E2，约 71.4 Hz |
 | PX4 / QGroundControl 通道验证 | ✅ | 可通过 `input_rc` 观察通道和失控状态 |
 | 200 ms 断联检测与 SBUS Failsafe | ✅ | 油门及 AUX 置低，姿态通道回中 |
-| 水桨、ESC 与舵机动力控制 | 🟡 | 代码保留，当前未启用 |
-| IMU、Bar30 与 SD 日志 | 🟡 | 代码保留，台架模式下未初始化 |
 
 ## 🔌 硬件连接
 
