@@ -46,8 +46,6 @@ uint32_t rx315_tail_errors = 0;
 uint32_t rx315_sync_errors = 0;
 uint32_t rx315_sequence_lost = 0;
 uint32_t rx315_last_valid_ms = 0;
-uint32_t rx315_last_frame_print_ms = 0;
-uint32_t rx315_last_status_print_ms = 0;
 bool rx315_has_valid_frame = false;
 bool rx315_sequence_initialized = false;
 bool rx315_link_connected = false;
@@ -92,73 +90,29 @@ uint16_t rx315Map6BitToPwm(uint16_t value) {
   return (uint16_t)(1000UL + ((uint32_t)value * 1000UL) / 63UL);
 }
 
-void rx315PrintFrame() {
-  Serial.print(F("RX315_VALID,frames="));
-  Serial.print(rx315_valid_frames);
-  Serial.print(F(",seq="));
-  Serial.print(rx315_sequence);
-  Serial.print(F(",ch="));
-
-  for (uint8_t i = 0; i < RX315_CHANNEL_COUNT; ++i) {
-    Serial.print(rx315_pwm_channel[i]);
-    if (i + 1 < RX315_CHANNEL_COUNT) {
-      Serial.print(',');
-    }
-  }
-
-  Serial.print(F(",crc_errors="));
-  Serial.print(rx315_crc_errors);
-  Serial.print(F(",tail_errors="));
-  Serial.print(rx315_tail_errors);
-  Serial.print(F(",sync_errors="));
-  Serial.println(rx315_sync_errors);
-}
-
-void rx315PrintStatus() {
-  Serial.print(F("RX315_STATUS,bytes="));
-  Serial.print(rx315_bytes);
-  Serial.print(F(",valid="));
-  Serial.print(rx315_valid_frames);
-  Serial.print(F(",crc_errors="));
-  Serial.print(rx315_crc_errors);
-  Serial.print(F(",tail_errors="));
-  Serial.print(rx315_tail_errors);
-  Serial.print(F(",sync_errors="));
-  Serial.print(rx315_sync_errors);
-  Serial.print(F(",seq_lost="));
-  Serial.print(rx315_sequence_lost);
-  Serial.print(F(",last_age_ms="));
-
-  if (!rx315_has_valid_frame) {
-    Serial.println(F("NA"));
-  } else {
-    Serial.println(millis() - rx315_last_valid_ms);
-  }
-}
-
 void rx315SetLinkState(bool connected) {
   if (connected == rx315_link_connected) {
     return;
   }
 
   rx315_link_connected = connected;
-  Serial.print(F("RX315_FLAG,"));
+  Serial.print(F("EVENT,rx="));
 
   if (connected) {
-    Serial.print(F("CONNECTED,frames="));
+    Serial.print(F("CONNECTED,frames_ok="));
     Serial.print(rx315_valid_frames);
     Serial.print(F(",seq="));
     Serial.println(rx315_sequence);
   } else {
-    Serial.print(F("DISCONNECTED,last_age_ms="));
+    Serial.print(F("DISCONNECTED,age_ms="));
     Serial.print(millis() - rx315_last_valid_ms);
-    Serial.print(F(",valid="));
+    Serial.print(F(",frames_ok="));
     Serial.print(rx315_valid_frames);
-    Serial.print(F(",crc_errors="));
+    Serial.print(F(",crc_err="));
     Serial.print(rx315_crc_errors);
-    Serial.print(F(",tail_errors="));
+    Serial.print(F(",tail_err="));
     Serial.print(rx315_tail_errors);
-    Serial.print(F(",sync_errors="));
+    Serial.print(F(",sync_err="));
     Serial.println(rx315_sync_errors);
   }
 }
@@ -225,11 +179,6 @@ void rx315HandlePayload() {
   rx315_last_valid_ms = millis();
   rx315_has_valid_frame = true;
   rx315SetLinkState(true);
-
-  if (millis() - rx315_last_frame_print_ms >= 100) {
-    rx315_last_frame_print_ms = millis();
-    rx315PrintFrame();
-  }
 }
 
 void rx315ResetParser(uint8_t current_value) {
@@ -300,12 +249,6 @@ void rx315Update() {
     rx315SetLinkState(false);
   }
 
-  // Do not continuously print parser statistics while disconnected.
-  if (rx315_link_connected &&
-      millis() - rx315_last_status_print_ms >= 1000) {
-    rx315_last_status_print_ms = millis();
-    rx315PrintStatus();
-  }
 }
 
 uint16_t rx315Channel(uint8_t index) {
@@ -332,4 +275,28 @@ uint32_t rx315LastFrameAgeMs() {
     return 0xFFFFFFFFUL;
   }
   return millis() - rx315_last_valid_ms;
+}
+
+uint32_t rx315ByteCount() {
+  return rx315_bytes;
+}
+
+uint32_t rx315ValidFrameCount() {
+  return rx315_valid_frames;
+}
+
+uint32_t rx315CrcErrorCount() {
+  return rx315_crc_errors;
+}
+
+uint32_t rx315TailErrorCount() {
+  return rx315_tail_errors;
+}
+
+uint32_t rx315SyncErrorCount() {
+  return rx315_sync_errors;
+}
+
+uint32_t rx315SequenceLostCount() {
+  return rx315_sequence_lost;
 }

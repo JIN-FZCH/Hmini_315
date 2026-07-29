@@ -50,10 +50,8 @@ const uint16_t SBUS_PX4_MID = 1002U;
 const uint16_t SBUS_PX4_MAX = 1802U;
 const uint32_t SBUS_OUTPUT_PERIOD_MS = 14UL;
 const uint16_t SBUS_FRAME_COUNT_MASK = 0x07FFU;
-const uint32_t SBUS_STATUS_PERIOD_MS = 1000UL;
 
 uint32_t sbus_last_output_ms = 0;
-uint32_t sbus_last_status_ms = 0;
 uint32_t sbus_output_total_frames = 0;
 uint16_t sbus_output_frame_count = 0;
 bool sbus_output_failsafe = true;
@@ -149,18 +147,24 @@ void sbusTransmitCurrentData() {
   sbus_tx.Write();
 }
 
-void sbusPrintStatus(uint32_t now) {
-  if (now - sbus_last_status_ms < SBUS_STATUS_PERIOD_MS) {
-    return;
+const char *sbusFailsafeReason() {
+  if (!rx315HasFreshFrame()) {
+    return "RX_LOST";
   }
+  if (control_mode == CONTROL_MODE_WATER) {
+    return "WATER_MODE";
+  }
+  return "SAFE_MODE";
+}
 
-  sbus_last_status_ms = now;
-  Serial.print(F("SBUS_TX_STATUS,frames="));
-  Serial.print(sbus_output_total_frames);
-  Serial.print(F(",seq="));
-  Serial.print(sbus_output_frame_count);
-  Serial.print(F(",failsafe="));
-  Serial.println(sbus_output_failsafe ? 1 : 0);
+void sbusPrintStateEvent(bool failsafe) {
+  Serial.print(F("EVENT,sbus="));
+  if (failsafe) {
+    Serial.print(F("FAILSAFE,reason="));
+    Serial.println(sbusFailsafeReason());
+  } else {
+    Serial.println(F("ACTIVE,reason=AIR_MODE"));
+  }
 }
 
 void sbusOutputBegin() {
@@ -171,7 +175,7 @@ void sbusOutputBegin() {
   // Send a defined failsafe frame immediately instead of uninitialized data.
   sbusTransmitCurrentData();
   sbus_last_output_ms = millis();
-  sbus_last_status_ms = sbus_last_output_ms;
+  Serial.println(F("EVENT,sbus=FAILSAFE,reason=STARTUP"));
 }
 
 void sbusOutputUpdate() {
@@ -181,14 +185,28 @@ void sbusOutputUpdate() {
   }
   sbus_last_output_ms = now;
 
-  if (rx315HasFreshFrame()) {
+  /*
+   * Only AIR mode may reach PX4 as live RC input. SAFE, WATER and receiver
+   * loss all use the same explicit SBUS failsafe frame.
+   */
+  const bool next_failsafe = !controlModeAllowsSbus();
+  if (!next_failsafe) {
     sbusSetRx315Data();
-    sbus_output_failsafe = false;
   } else {
     sbusSetFailsafeData();
-    sbus_output_failsafe = true;
   }
 
+  if (next_failsafe != sbus_output_failsafe) {
+    sbus_output_failsafe = next_failsafe;
+    sbusPrintStateEvent(sbus_output_failsafe);
+  }
   sbusTransmitCurrentData();
-  sbusPrintStatus(now);
+}
+
+bool sbusOutputIsFailsafe() {
+  return sbus_output_failsafe;
+}
+
+uint32_t sbusOutputTotalFrameCount() {
+  return sbus_output_total_frames;
 }
