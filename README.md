@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🌊 Hmini 315 遥控链路
+# 🌊 Hmini 315 遥控与控制链路
 
-**将 315 MHz 接收器的遥控数据，经 Arduino Mega 2560 转换为标准 SBUS，并送入 PX4。**
+**以 Arduino Mega 2560 作为 315 MHz 遥控数据的统一入口：Arduino 直接控制水下执行器，并通过标准 SBUS 将遥控数据转发至 PX4，由 PX4 控制空中执行器。**
 
 ![Status](https://img.shields.io/badge/通信链路-已打通-2ea44f?style=for-the-badge)
 ![Arduino](https://img.shields.io/badge/Arduino-Mega%202560-00979D?style=for-the-badge&logo=arduino&logoColor=white)
@@ -15,23 +15,30 @@
 
 ## 📖 项目简介
 
-本项目实现了一条完整的遥控数据传输链路：
+本项目实现了统一遥控输入和相互隔离的水下、空中控制链路：
 
 ```mermaid
 flowchart LR
     A["🎮 遥控手柄"] -->|"315 MHz"| B["📡 接收器"]
     B -->|"自定义 UART<br/>9600 baud · 8N1"| C["🧠 Arduino Mega 2560"]
-    C -->|"标准 SBUS<br/>100000 baud · 8E2"| D["✈️ PX4"]
-    D --> E["🖥️ QGroundControl"]
+    C -->|"WATER<br/>本地闭环控制"| W["🌊 水下执行器<br/>水桨 · 舵机"]
+    C -->|"AIR<br/>标准 SBUS · 100000 baud · 8E2"| D["🧭 PX4"]
+    D -->|"飞行控制输出"| F["✈️ 空中执行器<br/>空桨"]
+    D -.->|"状态监视与调试"| E["🖥️ QGroundControl"]
 
     style A fill:#fff3cd,stroke:#f59e0b,color:#1f2937
     style B fill:#dbeafe,stroke:#3b82f6,color:#1f2937
     style C fill:#ccfbf1,stroke:#00979d,color:#1f2937
+    style W fill:#dcfce7,stroke:#22c55e,color:#1f2937
     style D fill:#ede9fe,stroke:#8b5cf6,color:#1f2937
-    style E fill:#dcfce7,stroke:#22c55e,color:#1f2937
+    style F fill:#fee2e2,stroke:#ef4444,color:#1f2937
+    style E fill:#f3f4f6,stroke:#6b7280,color:#1f2937
 ```
 
-Arduino 负责接收并校验接收器发出的 24 字节数据帧，完成解扰、10 路通道解析和数值映射，再以标准 SBUS 持续转发给 PX4。链路断开时，Arduino 会主动发送带 `failsafe` 标志的安全帧。
+Arduino负责接收并校验24字节遥控数据帧，完成解扰、10路通道解析、数值映射和控制模式管理。
+WATER模式下，Arduino结合IMU与深度数据直接控制水桨和舵机；
+AIR模式下，Arduino通过标准SBUS将实时通道发送至PX4，由PX4控制空中执行器。
+SAFE、WATER或315断联时，Arduino向PX4持续发送Failsafe帧，避免两套执行器同时响应。
 
 > [!IMPORTANT]
 > 当前代码默认运行在**台架测试模式**：模式选择、通道映射、入水联锁、SBUS隔离和USB诊断日志正常运行，但水桨、ESC、舵机、IMU、深度计和SD日志仍保持禁用。完成断桨台架检查前，请勿关闭台架模式。
@@ -60,7 +67,7 @@ Arduino 负责接收并校验接收器发出的 24 字节数据帧，完成解�
 > [!CAUTION]
 > 标准 SBUS 使用**反相逻辑**。Arduino Mega 的硬件 UART 不会自动反相，因此 `D16 / TX2` 应经过板卡的 `SOUT` 反相和电平适配电路后再连接 PX4，不能默认将裸 UART TX 直接接入 PX4 的 SBUS 引脚。
 
-## 📦 数据链路
+## 📦 数据与控制链路
 
 ### 接收器 → Arduino
 
@@ -75,13 +82,21 @@ Arduino 负责接收并校验接收器发出的 24 字节数据帧，完成解�
 - 通道：`CH1～CH4` 使用 11 位精度，`CH5～CH10` 使用 6 位精度
 - 附加字段：11 位帧序号和 5 位保留字段
 
-### Arduino → PX4
+### Arduino → 水下执行器
+
+- WATER模式且启动联锁、IMU和深度数据均有效时，Arduino启用本地水下控制
+- 深度、俯仰和航向PID分别参与垂直水桨与水平推进桨控制
+- CH10直接控制左右互补舵机
+- AIR、SAFE、断联或传感器异常时，本地执行器恢复安全输出
+
+### Arduino → PX4 → 空中执行器
 
 - 输出标准 25 字节 SBUS 帧
 - `CH1～CH10` 保持接收器通道原顺序
 - 除诊断用 `CH14` 外，`CH11～CH16` 默认置于补偿后的安全中位
 - `CH14` 用作 11 位循环帧计数，仅供链路诊断
-- 超过 200 ms 未收到有效 315 数据帧时，置位 `lost_frame` 和 `failsafe`
+- AIR模式下向PX4转发实时通道，由PX4完成飞行控制并驱动空中执行器
+- SAFE、WATER或超过200 ms未收到有效315数据帧时，置位`lost_frame`和`failsafe`
 
 更完整的帧结构、位域、映射算法和状态机说明请参阅：
 
@@ -94,7 +109,7 @@ Arduino 负责接收并校验接收器发出的 24 字节数据帧，完成解�
 | CH1 — Yaw | `ch[0]` | 右摇杆左右 | 1000～2000 |
 | CH2 — Pitch | `ch[1]` | 右摇杆上下 | 1000～2000 |
 | CH3 — Throttle | `ch[2]` | 左摇杆上下 | 1000～2000 |
-| CH4 | `ch[3]` | 左摇杆左右 | 1000～2000 |
+| CH4 — 未分配 | `ch[3]` | 左摇杆左右 | 1000～2000 |
 | CH5 | `ch[4]` | 左扳机 SA | 1000 / 2000 |
 | CH6 | `ch[5]` | 左三档开关 SB | 1000 / 1492 / 2000 |
 | CH7 | `ch[6]` | 右三档开关 SC | 1000 / 1492 / 2000 |
