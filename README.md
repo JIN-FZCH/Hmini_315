@@ -2,7 +2,7 @@
 
 # 🌊 Hmini 315 空水两栖遥控与控制链路
 
-**基于 Arduino Mega 2560 的双域控制系统：解析自定义 315 MHz 遥控协议，在水下执行本地闭环控制，在空中通过标准 SBUS 接入 PX4。**
+**基于 Arduino Mega 2560 的双域控制系统：解析自定义 315 MHz 遥控协议，在水下执行本地闭环控制，在空中通过标准 SBUS 接入 PX4  📡 → 🧠 → 🌊 / ✈️**
 
 ![Status](https://img.shields.io/badge/通信链路-已打通-2ea44f?style=for-the-badge)
 ![Channels](https://img.shields.io/badge/RC-10%20Channels-2563EB?style=for-the-badge)
