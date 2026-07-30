@@ -39,13 +39,25 @@ void serialPrintStatus() {
   Serial.print(F(",mode="));
   Serial.print(controlModeName(control_mode));
   Serial.print(F(",sbus="));
-  Serial.print(
-    sbusOutputIsFailsafe() ? F("FAILSAFE") : F("ACTIVE")
-  );
+  Serial.print(sbusOutputStateName());
   Serial.print(F(",water="));
   Serial.print(
     water_control_unlocked ? F("UNLOCKED") : F("LOCKED")
   );
+  Serial.print(F(",actuators="));
+  Serial.print(
+    actuatorOutputsArmed() ? F("ARMED") : F("DISARMED")
+  );
+  Serial.print(F(",vertical="));
+  Serial.print(depth_control_enabled ? F("ACTIVE") : F("OFF"));
+  Serial.print(F(",servo_target_us="));
+  Serial.print(angle);
+  Serial.print(F(",servo_latched_us="));
+  Serial.print(servo_motion_target_us);
+  Serial.print(F(",servo_output_us="));
+  Serial.print(servo_output_us);
+  Serial.print(F(",servo_moving="));
+  Serial.print(servo_motion_active ? 1 : 0);
   Serial.print(F(",bench="));
 #if RX315_BENCH_TEST_ONLY
   Serial.print(1);
@@ -90,16 +102,32 @@ void serialPrintChannels() {
   Serial.print(rx315Channel(7));
   Serial.print(F(",SE="));
   Serial.print(rx315Channel(8));
-  Serial.print(F(",SI/SERVO="));
+  Serial.print(F(",SI="));
   Serial.print(rx315Channel(9));
-  Serial.print('/');
+  Serial.print(F(",SERVO_REQUEST="));
   Serial.print(angle);
   Serial.print(':');
   Serial.print(3000 - angle);
+  Serial.print(F(",SERVO_LATCHED="));
+  Serial.print(servo_motion_target_us);
+  Serial.print(':');
+  Serial.print(3000 - servo_motion_target_us);
+  Serial.print(F(",SERVO_OUTPUT="));
+  Serial.print(servo_output_us);
+  Serial.print(':');
+  Serial.print(3000 - servo_output_us);
+  Serial.print(F(",SERVO_MOVING="));
+  Serial.print(servo_motion_active ? 1 : 0);
   Serial.print(F(",WATER="));
-  Serial.println(
+  Serial.print(
     water_control_unlocked ? F("UNLOCKED") : F("LOCKED")
   );
+  Serial.print(F(",ACTUATORS="));
+  Serial.print(
+    actuatorOutputsArmed() ? F("ARMED") : F("DISARMED")
+  );
+  Serial.print(F(",VERTICAL="));
+  Serial.println(depth_control_enabled ? F("ACTIVE") : F("OFF"));
 }
 
 void serialPrintLink() {
@@ -123,6 +151,8 @@ void serialPrintLink() {
   Serial.print(rx315SequenceLostCount());
   Serial.print(F(",sbus_frames="));
   Serial.print(sbusOutputTotalFrameCount());
+  Serial.print(F(",sbus_state="));
+  Serial.print(sbusOutputStateName());
   Serial.print(F(",sbus_failsafe="));
   Serial.println(sbusOutputIsFailsafe() ? 1 : 0);
 }

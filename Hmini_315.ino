@@ -8,15 +8,25 @@
 #include <Servo.h>
 
 /*
- * 当前保持为台架接收和SBUS转发测试模式：
- * - 初始化 USB、315 MHz 接收器和Serial2 SBUS输出；
- * - 运行模式、通道映射、入水联锁和USB控制预览；
- * - 仅在AIR模式将315的10个实时通道转发到PX4；
- * - 不初始化传感器、SD、ESC 或舵机；
- *
- * 完成动力安全检查前不要改为 0。
+ * 完整外设模式。ESC和舵机在setup()中初始化。STOP/AIR模式始终
+ * 禁用本地执行器；从STOP切入WATER且入口与传感器检查通过后，
+ * 本地执行器自动启用。
  */
-#define RX315_BENCH_TEST_ONLY 1
+#define RX315_BENCH_TEST_ONLY 0
+
+const uint8_t ESC_FRONT_DEPTH_PIN = 7;
+const uint8_t ESC_REAR_DEPTH_PIN = 10;
+const uint8_t ESC_LEFT_YAW_PIN = 9;
+const uint8_t ESC_RIGHT_YAW_PIN = 8;
+const uint8_t SERVO_LEFT_PIN = 4;
+const uint8_t SERVO_RIGHT_PIN = 6;
+const float DEPTH_ZERO_DEADBAND_M = 0.03f;
+const int SERVO_SAFE_LEFT_US = 1000;
+const int SERVO_MIRROR_SUM_US = 3000;
+const uint16_t SERVO_SLEW_US_PER_SECOND = 500U;
+const uint16_t SERVO_UPDATE_PERIOD_MS = 20U;
+const uint16_t SERVO_MAX_ELAPSED_MS = 100U;
+const uint16_t SERVO_ENDPOINT_DWELL_MS = 500U;
 
 MS5837 sensor;
 
@@ -39,6 +49,11 @@ int yaw_315 = 1500;
 int pitch_315 = 1500;
 float depth_d_315 = 0;
 int angle = 1000;
+int servo_output_us = SERVO_SAFE_LEFT_US;
+int servo_motion_target_us = SERVO_SAFE_LEFT_US;
+bool servo_motion_active = false;
+uint32_t servo_last_update_ms = 0;
+uint32_t servo_motion_complete_ms = 0;
 
 float phi = 0;
 float the = 0;
@@ -57,6 +72,7 @@ bool depth_data_valid = false;
 uint32_t depth_last_update_ms = 0;
 uint32_t imu_last_update_ms = 0;
 uint32_t imu_last_frame_count = 0;
+bool actuator_outputs_armed = false;
 
 void SDwrite() {
   if (dataFile) {
@@ -70,8 +86,79 @@ void writeNeutralOutputs() {
   esc2.writeMicroseconds(1490);
   esc3.writeMicroseconds(1490);
   esc4.writeMicroseconds(1490);
-  servo_left.writeMicroseconds(1000);
-  servo_right.writeMicroseconds(2000);
+  servo_output_us = SERVO_SAFE_LEFT_US;
+  servo_motion_target_us = SERVO_SAFE_LEFT_US;
+  servo_motion_active = false;
+  servo_motion_complete_ms = millis();
+  servo_left.writeMicroseconds(servo_output_us);
+  servo_right.writeMicroseconds(
+    SERVO_MIRROR_SUM_US - servo_output_us
+  );
+}
+
+void updateServoOutputs(uint32_t now) {
+  if (!actuatorOutputsArmed() ||
+      control_mode != CONTROL_MODE_WATER) {
+    return;
+  }
+
+  const uint32_t elapsed = now - servo_last_update_ms;
+  if (elapsed < SERVO_UPDATE_PERIOD_MS) {
+    return;
+  }
+  servo_last_update_ms = now;
+
+  /*
+   * A command is latched only while idle. Changes arriving during motion are
+   * deliberately ignored; after reaching the endpoint and dwelling there,
+   * only the knob's latest state may start the next complete motion.
+   */
+  if (!servo_motion_active) {
+    if (now - servo_motion_complete_ms < SERVO_ENDPOINT_DWELL_MS) {
+      return;
+    }
+
+    const int requested_target = constrain(angle, 1000, 2000);
+    if (requested_target == servo_output_us) {
+      return;
+    }
+    servo_motion_target_us = requested_target;
+    servo_motion_active = true;
+  }
+
+  const uint32_t limited_elapsed =
+    elapsed > SERVO_MAX_ELAPSED_MS
+      ? SERVO_MAX_ELAPSED_MS
+      : elapsed;
+  int max_step = (int)(
+    ((uint32_t)SERVO_SLEW_US_PER_SECOND * limited_elapsed) /
+    1000UL
+  );
+  if (max_step < 1) {
+    max_step = 1;
+  }
+
+  if (servo_output_us < servo_motion_target_us) {
+    servo_output_us += min(
+      max_step,
+      servo_motion_target_us - servo_output_us
+    );
+  } else if (servo_output_us > servo_motion_target_us) {
+    servo_output_us -= min(
+      max_step,
+      servo_output_us - servo_motion_target_us
+    );
+  }
+
+  if (servo_output_us == servo_motion_target_us) {
+    servo_motion_active = false;
+    servo_motion_complete_ms = now;
+  }
+
+  servo_left.writeMicroseconds(servo_output_us);
+  servo_right.writeMicroseconds(
+    SERVO_MIRROR_SUM_US - servo_output_us
+  );
 }
 
 bool imuDataFresh(uint32_t now) {
@@ -86,6 +173,47 @@ bool depthDataFresh(uint32_t now) {
          now - depth_last_update_ms <= DEPTH_FRESH_TIMEOUT_MS;
 }
 
+bool actuatorOutputsArmed() {
+  return actuator_outputs_armed;
+}
+
+void armActuatorOutputs(const char *reason) {
+  actuator_outputs_armed = true;
+  resetWaterControllerState();
+  Serial.print(F("EVENT,actuators=ARMED,reason="));
+  Serial.println(reason);
+}
+
+void disarmActuatorOutputs(const char *reason) {
+  const bool was_armed = actuator_outputs_armed;
+  actuator_outputs_armed = false;
+  writeNeutralOutputs();
+  resetWaterControllerState();
+
+  if (was_armed) {
+    Serial.print(F("EVENT,actuators=DISARMED,reason="));
+    Serial.println(reason);
+  }
+}
+
+void enforceActuatorOutputSafety(uint32_t now) {
+  if (!actuator_outputs_armed) {
+    return;
+  }
+
+  if (!rx315HasFreshFrame()) {
+    disarmActuatorOutputs("RX_LOST");
+  } else if (control_mode != CONTROL_MODE_WATER) {
+    disarmActuatorOutputs("MODE_NOT_WATER");
+  } else if (!water_control_unlocked) {
+    disarmActuatorOutputs("WATER_LOCKED");
+  } else if (!imuDataFresh(now)) {
+    disarmActuatorOutputs("IMU_TIMEOUT");
+  } else if (!depthDataFresh(now)) {
+    disarmActuatorOutputs("DEPTH_TIMEOUT");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   rx315Begin();
@@ -95,6 +223,27 @@ void setup() {
 #if RX315_BENCH_TEST_ONLY
   return;
 #endif
+
+  pinMode(A10, OUTPUT);
+  pinMode(A11, OUTPUT);
+  digitalWrite(A10, LOW);
+  digitalWrite(A11, LOW);
+
+  /*
+   * Servo objects default to 1500 us. Preload every target before attach()
+   * so the first generated pulse is already the defined safe output.
+   */
+  writeNeutralOutputs();
+  esc1.attach(ESC_FRONT_DEPTH_PIN);
+  esc2.attach(ESC_REAR_DEPTH_PIN);
+  esc3.attach(ESC_LEFT_YAW_PIN);
+  esc4.attach(ESC_RIGHT_YAW_PIN);
+  servo_left.attach(SERVO_LEFT_PIN, 544, 2400);
+  servo_right.attach(SERVO_RIGHT_PIN, 544, 2400);
+  writeNeutralOutputs();
+  servo_last_update_ms = millis();
+  servo_motion_complete_ms = servo_last_update_ms;
+  Serial.println(F("EVENT,actuators=DISARMED,reason=STARTUP"));
 
   Serial1.begin(115200);
   imu_data_decode_init();
@@ -128,20 +277,6 @@ void setup() {
     depth_last_update_ms = millis();
   }
 
-  pinMode(A10, OUTPUT);
-  pinMode(A11, OUTPUT);
-  digitalWrite(A10, LOW);
-  digitalWrite(A11, LOW);
-
-  // 四个水桨：前、后、左、右。
-  esc1.attach(8);
-  esc2.attach(10);
-  esc3.attach(7);
-  esc4.attach(9);
-
-  servo_left.attach(4, 544, 2400);
-  servo_right.attach(6, 544, 2400);
-  writeNeutralOutputs();
 }
 
 void loop() {
@@ -175,7 +310,8 @@ void loop() {
       const float new_depth = sensor.depth() - Depth0;
       const float new_temp = sensor.temperature();
       if (isfinite(new_depth) && isfinite(new_temp)) {
-        Depth = new_depth;
+        Depth =
+          fabs(new_depth) <= DEPTH_ZERO_DEADBAND_M ? 0.0f : new_depth;
         Temp = new_temp;
         depth_data_valid = true;
         depth_last_update_ms = now;
@@ -185,13 +321,19 @@ void loop() {
     }
   }
 
+  enforceActuatorOutputSafety(now);
+  updateServoOutputs(now);
+
   if (now - time_now >= 50) {
     time_now = now;
 
     const bool imu_fresh = imuDataFresh(now);
     const bool depth_fresh = depthDataFresh(now);
 
-    if (waterControlCommandAllowed() && imu_fresh && depth_fresh) {
+    if (actuator_outputs_armed &&
+        waterControlCommandAllowed() &&
+        imu_fresh &&
+        depth_fresh) {
       Marine_Remote_315();
     } else {
       writeNeutralOutputs();

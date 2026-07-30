@@ -38,10 +38,10 @@ flowchart LR
 Arduino负责接收并校验24字节遥控数据帧，完成解扰、10路通道解析、数值映射和控制模式管理。
 WATER模式下，Arduino结合IMU与深度数据直接控制水桨和舵机；
 AIR模式下，Arduino通过标准SBUS将实时通道发送至PX4，由PX4控制空中执行器。
-SAFE、WATER或315断联时，Arduino向PX4持续发送Failsafe帧，避免两套执行器同时响应。
+手柄在线且处于STOP/WATER时，Arduino向PX4持续发送有效的安全中立SBUS帧；只有315真实断联时才置位SBUS Failsafe。
 
 > [!IMPORTANT]
-> 当前代码默认运行在**台架测试模式**：模式选择、通道映射、入水联锁、SBUS隔离和USB诊断日志正常运行，但水桨、ESC、舵机、IMU、深度计和SD日志仍保持禁用。完成断桨台架检查前，请勿关闭台架模式。
+> 当前代码已启用完整外设模式。必须拆除桨叶并确认舵机机构无碰撞后再上电；STOP和AIR模式会持续输出安全位置，只有从STOP安全切入WATER且传感器检查通过时才会自动启用本地执行器。
 
 ## ✅ 当前进度
 
@@ -63,6 +63,10 @@ SAFE、WATER或315断联时，Arduino向PX4持续发送Failsafe帧，避免两�
 | 板卡 `SOUT` | PX4 `RC/SBUS IN` | 经过反相与 3.3 V 电平适配的标准 SBUS |
 | Arduino `GND` | 接收器及 PX4 `GND` | 必须共地 |
 | Mega USB | 电脑 | 调试串口，115200 baud |
+| 前深度水桨 ESC | Mega `D7` | `esc1`，深度/俯仰 |
+| 后深度水桨 ESC | Mega `D10` | `esc2`，深度/俯仰 |
+| 左偏航水桨 ESC | Mega `D8` | `esc3`，前进/偏航 |
+| 右偏航水桨 ESC | Mega `D9` | `esc4`，前进/偏航 |
 
 > [!CAUTION]
 > 标准 SBUS 使用**反相逻辑**。Arduino Mega 的硬件 UART 不会自动反相，因此 `D16 / TX2` 应经过板卡的 `SOUT` 反相和电平适配电路后再连接 PX4，不能默认将裸 UART TX 直接接入 PX4 的 SBUS 引脚。
@@ -86,8 +90,8 @@ SAFE、WATER或315断联时，Arduino向PX4持续发送Failsafe帧，避免两�
 
 - WATER模式且启动联锁、IMU和深度数据均有效时，Arduino启用本地水下控制
 - 深度、俯仰和航向PID分别参与垂直水桨与水平推进桨控制
-- CH10直接控制左右互补舵机
-- AIR、SAFE、断联或传感器异常时，本地执行器恢复安全输出
+- CH10给出左右互补舵机的目标位置，实际输出经过非阻塞斜坡限速
+- AIR、STOP、断联或传感器异常时，本地执行器恢复安全输出
 
 ### Arduino → PX4 → 空中执行器
 
@@ -96,7 +100,8 @@ SAFE、WATER或315断联时，Arduino向PX4持续发送Failsafe帧，避免两�
 - 除诊断用 `CH14` 外，`CH11～CH16` 默认置于补偿后的安全中位
 - `CH14` 用作 11 位循环帧计数，仅供链路诊断
 - AIR模式下向PX4转发实时通道，由PX4完成飞行控制并驱动空中执行器
-- SAFE、WATER或超过200 ms未收到有效315数据帧时，置位`lost_frame`和`failsafe`
+- STOP/WATER且315在线时发送姿态回中、油门最低的有效SBUS帧，`lost_frame=false`、`failsafe=false`
+- 超过200 ms未收到有效315数据帧时才置位`lost_frame`和`failsafe`
 
 更完整的帧结构、位域、映射算法和状态机说明请参阅：
 
@@ -127,15 +132,29 @@ SAFE、WATER或315断联时，Arduino向PX4持续发送Failsafe帧，避免两�
 |---|---|---|
 | CH1 | `yaw_315` | 左右水平推进桨差动偏航 |
 | CH2 | `pitch_315` | 沿用旧变量名，实际为前后推进 Surge |
-| CH3 | `depth_d_315` | 1000→0.0 m，2000→1.0 m；摇杆上推增加目标深度 |
-| CH7 / SC | `control_mode` | 后档 AIR、中档 SAFE、前档 WATER |
-| CH10 / SI | `angle` | 左舵机为 `angle`，右舵机为 `3000-angle` |
+| CH3 | `depth_d_315` | ≤1050关闭垂直水桨；1050～2000映射0.0～1.0 m |
+| CH7 / SC | `control_mode` | 后档 AIR、中档 STOP、前档 WATER |
+| CH10 / SI | `angle` | 端点请求；每次动作锁定到完成，输出以400 us/s移动 |
 
-CH3给出的是“绝对目标深度”，不是直接控制水桨转向：摇杆上推会增大目标深度并使机器人下潜；摇杆下拉会减小目标深度并使机器人上浮。最下端目标为0 m，所以机器人位于水面附近时前后垂直水桨通常不会转动；机器人已经在水下时拨到最下端，控制器会尝试上浮到0 m。
+CH3底部≤1050是明确的垂直水桨停机区，前后垂直水桨强制输出1490 us，深度和俯仰闭环均不参与；超过1050后才进入绝对深度控制。该设计可避免台面或水面测试时因气压漂移、深度零点误差和姿态误差造成水桨转动。代价是机器人在水下把CH3拨到底时不会主动推到水面，只能依靠自身浮力。
 
-CH7 后档（≤1250）为 AIR，Arduino 本地执行器保持安全输出并向PX4转发实时SBUS；中档为 SAFE；前档（≥1750）为 WATER。SAFE和WATER都向PX4发送failsafe帧，防止空中执行器与水下执行器同时响应。
+CH7 后档（≤1250）为 AIR，Arduino 本地执行器保持安全输出并向PX4转发实时SBUS；中档为 STOP；前档（≥1750）为 WATER。STOP会立即禁用本地电机和舵机控制；STOP和WATER向PX4发送有效的安全中立帧，避免因主动模式隔离持续触发PX4 RC Failsafe报警。
 
-每次进入WATER都必须重新通过入水联锁：CH1和CH2位于1470～1530且CH3≤1050（目标深度接近0 m）。315失联、IMU超时或深度数据无效会重新锁定水下输出。
+> [!WARNING]
+> 安全中立SBUS帧表示油门通道最低，并不等价于PX4电机输出端的“0 PWM”。若PX4已经解锁，具体机型和参数仍可能保持电机怠速。台架测试必须拆桨并保持PX4未解锁。
+
+每次从STOP进入WATER都必须重新通过入水联锁：CH1和CH2位于1470～1530、CH3≤1050且IMU与深度数据新鲜。检查通过后自动启用本地执行器，不再需要USB串口ARM命令。315失联、切回STOP/AIR、IMU超时或深度数据无效会重新锁定水下输出。
+
+当前手柄右旋钮只产生1000/2000两个端点，因此代码使用“端点动作锁存”：
+
+- 空闲时读取旋钮并锁定本次端点；
+- 每20 ms以`SERVO_SLEW_US_PER_SECOND = 400` us/s向锁定端点移动，完整行程约2.5秒；
+- 动作过程中忽略全部旋钮变化，禁止中途反向；
+- 到达端点后强制停留`SERVO_ENDPOINT_DWELL_MS = 500` ms；
+- 停留结束后只读取旋钮当时的最终状态，若需要才启动下一次完整动作，中途切换不会形成命令队列；
+- STOP、AIR、失联或传感器故障会绕过斜坡并立即回到1000/2000安全位置。
+
+动作锁存只能避免频繁反向，不能防止机械堵转。必须确认1000/2000 us没有把连杆顶在物理限位上，否则舵机到位后仍会持续大电流发热。
 
 ## 🚀 快速开始
 
@@ -153,14 +172,17 @@ CH7 后档（≤1250）为 AIR，Arduino 本地执行器保持安全输出并向
 
 1. 使用 Arduino IDE 打开 `Hmini_315/Hmini_315.ino`。
 2. 开发板选择 **Arduino Mega or Mega 2560**。
-3. 确认主草图中保持：
+3. 确认主草图使用完整外设模式：
 
    ```cpp
-   #define RX315_BENCH_TEST_ONLY 1
+   #define RX315_BENCH_TEST_ONLY 0
    ```
 
-4. 选择正确串口并编译、上传。
-5. 打开 115200 baud 串口监视器。
+   完整模式会初始化传感器、ESC和舵机。上电默认`DISARMED`，STOP/AIR保持安全输出，从STOP安全进入WATER后自动变为`ARMED`。
+
+4. 拆除所有桨叶，确认舵机启动位置不会碰撞机械限位。
+5. 选择正确串口并编译、上传。
+6. 打开 115200 baud 串口监视器。
 
 串口命令支持“换行”“回车”或“两者同时”作为行结束符；“无行结束符”不会执行命令。
 
@@ -168,7 +190,9 @@ CH7 后档（≤1250）为 AIR，Arduino 本地执行器保持安全输出并向
 
 ```text
 EVENT,sbus=FAILSAFE,reason=STARTUP
+EVENT,actuators=DISARMED,reason=STARTUP
 EVENT,rx=CONNECTED,frames_ok=...,seq=...
+EVENT,sbus=NEUTRAL,reason=STOP_MODE
 EVENT,mode=AIR,ch7=1000,rx=CONNECTED
 EVENT,sbus=ACTIVE,reason=AIR_MODE
 ```
@@ -189,10 +213,10 @@ EVENT,sbus=ACTIVE,reason=AIR_MODE
 `CHANNELS`使用物理控件和水下语义组合名称，避免重复列出原始通道与映射值：
 
 ```text
-CHANNELS,RSX/YAW=1500,RSY/SURGE=1500,LSY/DEPTH=1304/0.304m,LSX=1500,SA=1000,SB=1000,SC/MODE=1492/SAFE,SD=1000,SE=1000,SI/SERVO=1000/1000:2000,WATER=LOCKED
+CHANNELS,RSX/YAW=1500,RSY/SURGE=1500,LSY/DEPTH=1000/0.000m,LSX=1500,SA=1000,SB=1000,SC/MODE=1492/STOP,SD=1000,SE=1000,SI=1000,SERVO_REQUEST=1000:2000,SERVO_LATCHED=1000:2000,SERVO_OUTPUT=1000:2000,SERVO_MOVING=0,WATER=LOCKED,ACTUATORS=DISARMED,VERTICAL=OFF
 ```
 
-其中 `RSX/RSY` 是右摇杆横/纵轴，`LSX/LSY` 是左摇杆横/纵轴；舵机值顺序为“旋钮输入/左:右”。
+其中 `RSX/RSY` 是右摇杆横/纵轴，`LSX/LSY` 是左摇杆横/纵轴；`SERVO_REQUEST`是旋钮当前请求，`SERVO_LATCHED`是本次动作锁定且运动中不可更改的目标，`SERVO_OUTPUT`是实际脉宽。
 
 ### 3. 在 PX4 / QGC 中验证
 
@@ -211,14 +235,14 @@ CH7置于AIR档时的预期结果：
 - 关闭手柄超过 200 ms 后 `rc_failsafe=true`；
 - 恢复连接后通道与状态自动恢复。
 
-CH7置于SAFE或WATER档时，Arduino会有意向PX4发送 `failsafe=true` 的隔离帧。
+CH7置于STOP或WATER档且315在线时，Arduino会发送姿态回中、油门最低且`failsafe=false`的`NEUTRAL`帧。关闭手柄或315链路超过200 ms无有效帧后，才发送`failsafe=true`。
 
 > [!NOTE]
 > 请使用 QGC 的 **Radio** 页面验证飞控收到的 RC 数据；**Joystick** 页面用于电脑 USB/HID 手柄，不适用于本链路。
 
 ## 🛡️ 失控保护
 
-当接收器噪声仍存在但没有通过 CRC 和帧尾校验的有效帧时，系统不会误判为在线。最后一帧有效数据超过 200 ms，或模式处于SAFE/WATER时，Arduino 将持续发送安全 SBUS 帧：
+当接收器噪声仍存在但没有通过 CRC 和帧尾校验的有效帧时，系统不会误判为在线。最后一帧有效数据超过200 ms时，Arduino持续发送真正的Failsafe SBUS帧：
 
 - Roll、Pitch、Yaw：回中
 - Throttle：最低
@@ -227,6 +251,10 @@ CH7置于SAFE或WATER档时，Arduino会有意向PX4发送 `failsafe=true` 的�
 - `failsafe=true`
 
 重新收到有效帧后，系统会自动恢复实时通道输出。
+
+如果恢复时手柄位于STOP/WATER，SBUS状态先恢复为`NEUTRAL`；只有AIR模式才恢复为`ACTIVE`并转发实时通道。
+
+本地水下执行器总锁不写入EEPROM，每次上电均为`DISARMED`。从STOP切入WATER且入口和传感器检查通过后自动变为`ARMED`；315失联、切回STOP/AIR、IMU超时或深度超时都会自动恢复安全输出并切回`DISARMED`。恢复后必须先回STOP，再重新安全进入WATER。
 
 ## 🗂️ 仓库结构
 
@@ -264,7 +292,7 @@ Arduino IDE 会自动合并 `Hmini_315/` 目录中的所有 `.ino` 文件进行�
 ## 🧭 下一阶段
 
 - [x] 完成 315 通道到水下控制变量的映射
-- [x] 增加 AIR / SAFE / WATER 隔离和入水联锁
+- [x] 增加 AIR / STOP / WATER 隔离和入水联锁
 - [x] 增加台架控制预览与安全边界日志
 - [ ] 断桨确认通道方向、中位死区和输出方向
 - [ ] 完成执行器上电与断联安全检查

@@ -54,7 +54,8 @@ const uint16_t SBUS_FRAME_COUNT_MASK = 0x07FFU;
 uint32_t sbus_last_output_ms = 0;
 uint32_t sbus_output_total_frames = 0;
 uint16_t sbus_output_frame_count = 0;
-bool sbus_output_failsafe = true;
+
+SbusOutputState sbus_output_state = SBUS_OUTPUT_FAILSAFE;
 
 uint16_t sbusEncodePwmForPx4(uint16_t pwm, uint16_t pwm_mid) {
   if (pwm <= RX315_PWM_MIN) {
@@ -84,12 +85,12 @@ uint16_t sbusEncodePwmForPx4(uint16_t pwm, uint16_t pwm_mid) {
   );
 }
 
-void sbusSetFailsafeData() {
+void sbusSetNeutralData() {
   for (uint8_t i = 0; i < data.NUM_CH; ++i) {
     data.ch[i] = SBUS_PX4_MID;
   }
 
-  // Safe stick values: roll/pitch/yaw centered and throttle at minimum.
+  // Valid safe RC values: roll/pitch/yaw centered and throttle at minimum.
   data.ch[0] = SBUS_PX4_MID;
   data.ch[1] = SBUS_PX4_MID;
   data.ch[2] = SBUS_PX4_MIN;
@@ -102,6 +103,12 @@ void sbusSetFailsafeData() {
 
   data.ch17 = false;
   data.ch18 = false;
+  data.lost_frame = false;
+  data.failsafe = false;
+}
+
+void sbusSetFailsafeData() {
+  sbusSetNeutralData();
   data.lost_frame = true;
   data.failsafe = true;
 }
@@ -147,29 +154,39 @@ void sbusTransmitCurrentData() {
   sbus_tx.Write();
 }
 
-const char *sbusFailsafeReason() {
-  if (!rx315HasFreshFrame()) {
-    return "RX_LOST";
+const char *sbusOutputStateName() {
+  switch (sbus_output_state) {
+    case SBUS_OUTPUT_ACTIVE:
+      return "ACTIVE";
+    case SBUS_OUTPUT_NEUTRAL:
+      return "NEUTRAL";
+    default:
+      return "FAILSAFE";
   }
-  if (control_mode == CONTROL_MODE_WATER) {
-    return "WATER_MODE";
-  }
-  return "SAFE_MODE";
 }
 
-void sbusPrintStateEvent(bool failsafe) {
-  Serial.print(F("EVENT,sbus="));
-  if (failsafe) {
-    Serial.print(F("FAILSAFE,reason="));
-    Serial.println(sbusFailsafeReason());
-  } else {
-    Serial.println(F("ACTIVE,reason=AIR_MODE"));
+const char *sbusOutputStateReason(SbusOutputState state) {
+  if (state == SBUS_OUTPUT_FAILSAFE) {
+    return "RX_LOST";
   }
+  if (state == SBUS_OUTPUT_ACTIVE) {
+    return "AIR_MODE";
+  }
+  return control_mode == CONTROL_MODE_WATER
+           ? "WATER_MODE"
+           : "STOP_MODE";
+}
+
+void sbusPrintStateEvent(SbusOutputState state) {
+  Serial.print(F("EVENT,sbus="));
+  Serial.print(sbusOutputStateName());
+  Serial.print(F(",reason="));
+  Serial.println(sbusOutputStateReason(state));
 }
 
 void sbusOutputBegin() {
   sbusSetFailsafeData();
-  sbus_output_failsafe = true;
+  sbus_output_state = SBUS_OUTPUT_FAILSAFE;
   sbus_tx.Begin();
 
   // Send a defined failsafe frame immediately instead of uninitialized data.
@@ -186,25 +203,36 @@ void sbusOutputUpdate() {
   sbus_last_output_ms = now;
 
   /*
-   * Only AIR mode may reach PX4 as live RC input. SAFE, WATER and receiver
-   * loss all use the same explicit SBUS failsafe frame.
+   * AIR forwards live RC. With a fresh receiver, STOP and WATER send valid
+   * neutral/minimum-throttle RC data without setting failsafe. A real
+   * receiver loss still sets both SBUS loss flags.
    */
-  const bool next_failsafe = !controlModeAllowsSbus();
-  if (!next_failsafe) {
+  SbusOutputState next_state;
+  if (!rx315HasFreshFrame()) {
+    next_state = SBUS_OUTPUT_FAILSAFE;
+  } else if (controlModeAllowsSbus()) {
+    next_state = SBUS_OUTPUT_ACTIVE;
+  } else {
+    next_state = SBUS_OUTPUT_NEUTRAL;
+  }
+
+  if (next_state == SBUS_OUTPUT_ACTIVE) {
     sbusSetRx315Data();
+  } else if (next_state == SBUS_OUTPUT_NEUTRAL) {
+    sbusSetNeutralData();
   } else {
     sbusSetFailsafeData();
   }
 
-  if (next_failsafe != sbus_output_failsafe) {
-    sbus_output_failsafe = next_failsafe;
-    sbusPrintStateEvent(sbus_output_failsafe);
+  if (next_state != sbus_output_state) {
+    sbus_output_state = next_state;
+    sbusPrintStateEvent(sbus_output_state);
   }
   sbusTransmitCurrentData();
 }
 
 bool sbusOutputIsFailsafe() {
-  return sbus_output_failsafe;
+  return sbus_output_state == SBUS_OUTPUT_FAILSAFE;
 }
 
 uint32_t sbusOutputTotalFrameCount() {

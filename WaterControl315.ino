@@ -19,10 +19,12 @@ const uint16_t CONTROL_STICK_MID = 1500U;
 const uint16_t CONTROL_STICK_DEADBAND = 10U;
 const uint16_t CONTROL_ENTRY_DEADBAND = 30U;
 const uint16_t CONTROL_ENTRY_DEPTH_MAX = 1050U;
+const uint16_t CONTROL_DEPTH_OFF_MAX = 1050U;
 
-ControlMode control_mode = CONTROL_MODE_SAFE;
+ControlMode control_mode = CONTROL_MODE_STOP;
 bool water_entry_safe = false;
 bool water_control_unlocked = false;
+bool depth_control_enabled = false;
 
 float water_yaw_target = 0;
 int water_last_surge = 1500;
@@ -39,7 +41,7 @@ const char *controlModeName(ControlMode mode) {
     case CONTROL_MODE_WATER:
       return "WATER";
     default:
-      return "SAFE";
+      return "STOP";
   }
 }
 
@@ -54,14 +56,20 @@ int controlApplyStickDeadband(uint16_t pwm) {
 
 float controlMapDepth(uint16_t pwm) {
   const int value = constrain((int)pwm, 1000, 2000);
-  // Absolute depth target (positive downward), not direct vertical thrust:
-  // stick bottom = 0 m, stick top = 1 m.
-  return (value - 1000) / 1000.0f;
+  /*
+   * The bottom region explicitly disables both vertical thrusters. Above
+   * that region, map the remaining travel to a 0...1 m depth setpoint.
+   */
+  if (value <= (int)CONTROL_DEPTH_OFF_MAX) {
+    return 0.0f;
+  }
+  return (value - (int)CONTROL_DEPTH_OFF_MAX) /
+         (2000.0f - (float)CONTROL_DEPTH_OFF_MAX);
 }
 
 ControlMode controlDecodeMode(bool fresh, uint16_t mode_pwm) {
   if (!fresh) {
-    return CONTROL_MODE_SAFE;
+    return CONTROL_MODE_STOP;
   }
   if (mode_pwm <= CONTROL_MODE_AIR_MAX) {
     return CONTROL_MODE_AIR;
@@ -69,7 +77,7 @@ ControlMode controlDecodeMode(bool fresh, uint16_t mode_pwm) {
   if (mode_pwm >= CONTROL_MODE_WATER_MIN) {
     return CONTROL_MODE_WATER;
   }
-  return CONTROL_MODE_SAFE;
+  return CONTROL_MODE_STOP;
 }
 
 const char *controlEntryGuardReason(uint16_t yaw_pwm,
@@ -117,6 +125,8 @@ void invalidateWaterControl(const char *reason) {
   }
 
   water_control_unlocked = false;
+  depth_control_enabled = false;
+  disarmActuatorOutputs(reason);
   resetWaterControllerState();
   control_water_lock_reported = true;
   Serial.print(F("EVENT,water=LOCKED,reason="));
@@ -139,6 +149,8 @@ void updateControlState() {
   yaw_315 = controlApplyStickDeadband(yaw_pwm);
   pitch_315 = controlApplyStickDeadband(surge_pwm);
   depth_d_315 = controlMapDepth(depth_pwm);
+  depth_control_enabled =
+    fresh && depth_pwm > CONTROL_DEPTH_OFF_MAX;
   angle = constrain((int)servo_pwm, 1000, 2000);
 
   const ControlMode requested_mode =
@@ -147,7 +159,17 @@ void updateControlState() {
     !control_mode_initialized || requested_mode != control_mode;
 
   if (mode_changed) {
+    if (actuatorOutputsArmed()) {
+      disarmActuatorOutputs(
+        !fresh
+          ? "RX_LOST"
+          : requested_mode == CONTROL_MODE_STOP
+              ? "STOP_MODE"
+              : "MODE_CHANGE"
+      );
+    }
     water_control_unlocked = false;
+    depth_control_enabled = false;
     control_mode = requested_mode;
     control_mode_initialized = true;
     water_entry_safe = false;
@@ -160,6 +182,7 @@ void updateControlState() {
   if (control_mode != CONTROL_MODE_WATER) {
     water_entry_safe = false;
     water_control_unlocked = false;
+    depth_control_enabled = false;
     return;
   }
 
@@ -190,10 +213,18 @@ void updateControlState() {
    * leave and re-enter the safe region (or cycle the mode switch).
    */
   if (entry_safe_rising && !water_control_unlocked) {
-    water_control_unlocked = true;
     control_water_lock_reported = true;
-    resetWaterControllerState();
-    Serial.println(F("EVENT,water=UNLOCKED,reason=ENTRY_SAFE"));
+    const uint32_t now = millis();
+    if (!imuDataFresh(now)) {
+      Serial.println(F("EVENT,water=LOCKED,reason=IMU_STALE"));
+    } else if (!depthDataFresh(now)) {
+      Serial.println(F("EVENT,water=LOCKED,reason=DEPTH_STALE"));
+    } else {
+      water_control_unlocked = true;
+      resetWaterControllerState();
+      armActuatorOutputs("WATER_ENTRY_SAFE");
+      Serial.println(F("EVENT,water=UNLOCKED,reason=ENTRY_SAFE"));
+    }
   }
   control_last_entry_safe = water_entry_safe;
 }
@@ -206,7 +237,8 @@ bool controlModeAllowsSbus() {
 bool waterControlCommandAllowed() {
   return rx315HasFreshFrame() &&
          control_mode == CONTROL_MODE_WATER &&
-         water_control_unlocked;
+         water_control_unlocked &&
+         actuatorOutputsArmed();
 }
 
 void Marine_Remote_315() {
@@ -233,16 +265,15 @@ void Marine_Remote_315() {
   const float Thr = pitch_315 - 1500;
   const float Yaw = yaw_315 - 1500;
 
-  if (depth_d_315 == 0) {
+  if (!depth_control_enabled) {
     errSum[0] = 0;
-    errSum[1] = 0;
     errSum[2] = 0;
-    errSum[3] = 0;
   }
 
-  const float e_depth = depth_d_315 - Depth;
+  const float e_depth =
+    depth_control_enabled ? depth_d_315 - Depth : 0.0f;
   const float e_roll = -phi;
-  const float e_pitch = -the;
+  const float e_pitch = depth_control_enabled ? -the : 0.0f;
   float error[4] = {e_depth, e_roll, e_pitch, e_yaw};
   float *u = PID_outloop(error);
 
@@ -257,8 +288,12 @@ void Marine_Remote_315() {
    */
   (void)u_roll;
 
-  int pwm1 = constrain(1490 + u_depth + u_pitch, 1100, 1900);
-  int pwm2 = constrain(1490 + u_depth - u_pitch, 1100, 1900);
+  int pwm1 = 1490;
+  int pwm2 = 1490;
+  if (depth_control_enabled) {
+    pwm1 = constrain(1490 + u_depth + u_pitch, 1100, 1900);
+    pwm2 = constrain(1490 + u_depth - u_pitch, 1100, 1900);
+  }
   esc1.writeMicroseconds(pwm1);
   esc2.writeMicroseconds(pwm2);
 
@@ -275,9 +310,6 @@ void Marine_Remote_315() {
   thr2 = constrain(thr2, 1000, 2000);
   esc3.writeMicroseconds(thr1);
   esc4.writeMicroseconds(thr2);
-
-  servo_left.writeMicroseconds(angle);
-  servo_right.writeMicroseconds(3000 - angle);
 
   SDdata.concat(phi);
   SDdata.concat(',');
