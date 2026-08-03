@@ -1,3 +1,5 @@
+#include "ControlState.h"
+
 /*
  * 315 MHz receiver production module
  *

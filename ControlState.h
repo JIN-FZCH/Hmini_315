@@ -2,6 +2,7 @@
 #define HMINI_315_CONTROL_STATE_H
 
 #include <Arduino.h>
+#include <Servo.h>
 
 enum ControlMode : uint8_t {
   CONTROL_MODE_AIR,
@@ -23,6 +24,25 @@ extern bool depth_control_enabled;
 extern int servo_output_us;
 extern int servo_motion_target_us;
 extern bool servo_motion_active;
+
+extern Servo esc1;
+extern Servo esc2;
+extern Servo esc3;
+extern Servo esc4;
+extern Servo servo_left;
+extern Servo servo_right;
+
+extern String SDdata;
+extern float Depth;
+extern float phi;
+extern float the;
+extern float psi;
+extern float depth_d_315;
+extern float errSum[4];
+extern float d_att[4];
+extern int yaw_315;
+extern int pitch_315;
+extern int angle;
 
 void updateControlState();
 bool controlModeAllowsSbus();
@@ -52,6 +72,8 @@ void TD(float *x, float u);
 float fst(float *x, float u, float r, float h);
 float sgn(float x);
 float *PID_outloop(float error[]);
+
+void SDwrite();
 
 uint32_t rx315ByteCount();
 bool rx315HasFreshFrame();

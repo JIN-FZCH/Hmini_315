@@ -1,3 +1,5 @@
+#include "ControlState.h"
+
 /*
  * Non-blocking USB serial console.
  *

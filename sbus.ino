@@ -24,6 +24,7 @@
 */
 
 #include "sbus.h"
+#include "ControlState.h"
 
 /*
  * Arduino Mega Serial2 TX / D16 -> board SOUT -> PX4 RC/SBUS input.

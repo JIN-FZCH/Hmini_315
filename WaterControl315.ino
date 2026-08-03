@@ -1,3 +1,5 @@
+#include "ControlState.h"
+
 /*
  * 315 MHz handset control and local water-actuator control.
  *
