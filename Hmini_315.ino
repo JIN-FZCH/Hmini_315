@@ -81,24 +81,37 @@ void SDwrite() {
   SDdata = "";
 }
 
-void writeNeutralOutputs() {
+void writeNeutralThrusterOutputs() {
   esc1.writeMicroseconds(1490);
   esc2.writeMicroseconds(1490);
   esc3.writeMicroseconds(1490);
   esc4.writeMicroseconds(1490);
+}
+
+void writeSafeServoOutputs() {
   servo_output_us = SERVO_SAFE_LEFT_US;
   servo_motion_target_us = SERVO_SAFE_LEFT_US;
   servo_motion_active = false;
   servo_motion_complete_ms = millis();
+
   servo_left.writeMicroseconds(servo_output_us);
   servo_right.writeMicroseconds(
     SERVO_MIRROR_SUM_US - servo_output_us
   );
 }
 
+void writeNeutralOutputs() {
+  writeNeutralThrusterOutputs();
+  writeSafeServoOutputs();
+}
+
 void updateServoOutputs(uint32_t now) {
-  if (!actuatorOutputsArmed() ||
-      control_mode != CONTROL_MODE_WATER) {
+  const bool servo_allowed =
+    rx315HasFreshFrame() &&
+    control_mode == CONTROL_MODE_AIR;
+
+  if (!servo_allowed) {
+    writeSafeServoOutputs();
     return;
   }
 
@@ -336,7 +349,7 @@ void loop() {
         depth_fresh) {
       Marine_Remote_315();
     } else {
-      writeNeutralOutputs();
+      writeNeutralThrusterOutputs();
       resetWaterControllerState();
 
       if (control_mode == CONTROL_MODE_WATER &&
