@@ -58,7 +58,7 @@ void serialPrintStatus() {
   Serial.print(depth_control_enabled ? F("ACTIVE") : F("OFF"));
   Serial.print(F(",servo_target_us="));
   Serial.print(angle);
-  Serial.print(F(",servo_latched_us="));
+  Serial.print(F(",servo_tracking_target_us="));
   Serial.print(servo_motion_target_us);
   Serial.print(F(",servo_output_us="));
   Serial.print(servo_output_us);
@@ -114,7 +114,7 @@ void serialPrintChannels() {
   Serial.print(angle);
   Serial.print(':');
   Serial.print(3000 - angle);
-  Serial.print(F(",SERVO_LATCHED="));
+  Serial.print(F(",SERVO_TARGET="));
   Serial.print(servo_motion_target_us);
   Serial.print(':');
   Serial.print(3000 - servo_motion_target_us);

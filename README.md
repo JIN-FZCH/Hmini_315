@@ -6,7 +6,7 @@
 
 ![Status](https://img.shields.io/badge/通信链路-已打通-2ea44f?style=for-the-badge)
 ![Channels](https://img.shields.io/badge/RC-10%20Channels-2563EB?style=for-the-badge)
-![Failsafe](https://img.shields.io/badge/Failsafe-200%20ms-EF4444?style=for-the-badge)
+![Failsafe](https://img.shields.io/badge/Failsafe-350%20ms-EF4444?style=for-the-badge)
 ![Arduino](https://img.shields.io/badge/Arduino-Mega%202560-00979D?style=for-the-badge&logo=arduino&logoColor=white)
 ![PX4](https://img.shields.io/badge/PX4-SBUS-8A2BE2?style=for-the-badge)
 
@@ -77,7 +77,7 @@ flowchart LR
 | 飞控接口 | 标准 25 字节 SBUS |
 | SBUS 输出 | `Serial2`，100000 baud，8E2，14 ms 周期（约 71.4 Hz） |
 | 控制模式 | AIR / STOP / WATER |
-| 断联判定 | 200 ms 内无有效 315 数据帧 |
+| 断联判定 | 200 ms 正常窗口 + 150 ms 瞬断宽限，350 ms 后确认失联 |
 | 传感器时效 | IMU 与深度数据分别进行 250 ms 新鲜度检查 |
 | 本地控制 | 深度、俯仰、航向 PID 与四水桨混控 |
 
@@ -108,9 +108,10 @@ Arduino 使用状态机从连续 UART 字节流中恢复帧边界，并完成以
 2. 使用初值 `0x00`、多项式 `0x31` 的 CRC-8 校验线上 `Data'[12]`；
 3. 通过 `BD / DB` 交替异或恢复原始 12 字节数据；
 4. 从非字节对齐位域中提取 4 路 11 位通道、6 路 6 位通道、11 位帧序号和 5 位保留字段；
-5. 将通道统一映射到 1000～2000 的 PWM 风格数值。
+5. 将通道统一映射到 1000～2000 的 PWM 风格数值；
+6. 针对手柄SURGE通道的偏移和上限截断，以实测 `1126 / 1621 / 2000` 三点分段校准为 `1000 / 1500 / 2000`。
 
-链路在线状态不以 `Serial3.available()` 为依据。即使手柄关闭后接收器仍产生噪声，只有通过全部校验的有效帧才能刷新 200 ms 链路计时器。CRC 或帧尾错误只增加诊断计数，不会覆盖最近一次有效控制数据。
+链路在线状态不以 `Serial3.available()` 为依据。即使手柄关闭后接收器仍产生噪声，只有通过全部校验的有效帧才能刷新链路计时器。最近一帧超过200 ms后进入150 ms瞬断宽限，期间保持上一帧和当前控制状态；350 ms内恢复有效帧不会产生断连/重连状态跳变。CRC或帧尾错误只增加诊断计数，不会覆盖最近一次有效控制数据。
 
 ### 🔁 2. 标准 SBUS 协议桥接
 
@@ -130,7 +131,7 @@ Arduino 将解析后的 CH1～CH10 按原顺序编码为标准 25 字节 SBUS，
 
 ```mermaid
 flowchart LR
-    R{"315 有效帧<br/>≤ 200 ms?"}
+    R{"315 有效帧<br/>≤ 350 ms?<br/>含150 ms瞬断宽限"}
     R -->|"否"| F["FAILSAFE<br/>本地安全输出<br/>SBUS 失控位置位"]
     R -->|"是"| M{"CH7 模式"}
     M -->|"AIR"| A["推进器安全输出<br/>CH10舵机 · 实时SBUS"]
@@ -157,7 +158,7 @@ flowchart LR
 | WATER（已解锁） | 本地闭环控制 | 安全位置 | 姿态回中、油门与 AUX 置低 | `NEUTRAL` |
 | 315 断联 | 安全输出并重新锁定 | 安全位置 | 安全通道值 | `FAILSAFE` |
 
-这里将“主动模式隔离”和“真实无线链路失效”明确分开：STOP/WATER 仍发送 `lost_frame=false`、`failsafe=false` 的有效安全中立帧，只有 315 链路超过 200 ms 无有效帧时才同时置位两个失控标志。
+这里将“主动模式隔离”和“真实无线链路失效”明确分开：STOP/WATER 仍发送 `lost_frame=false`、`failsafe=false` 的有效安全中立帧。315链路在200～350 ms瞬断宽限内保持上一帧；只有超过350 ms仍无有效帧时才同时置位两个失控标志。
 
 ### 🌊 4. 水下闭环与推进器混控
 
@@ -181,7 +182,7 @@ WATER 模式下，Arduino 将遥控目标与传感器反馈组合为本地控制
 - 315 数据有效；
 - IMU 和深度数据均新鲜。
 
-315 失联、切换到 STOP/AIR、IMU 超时或深度超时都会立即让推进器恢复安全输出并撤销WATER权限。左右互补舵机只在`AIR_ACTIVE`时响应CH10，采用非阻塞斜坡和端点动作锁存，以500 us/s移动；STOP、WATER或失联时立即回安全位置。
+315 失联、切换到 STOP/AIR、IMU 超时或深度超时都会立即让推进器恢复安全输出并撤销WATER权限。断联不会伪造成STOP模式切换，而是保留最后一次模式并进入独立的`RX_FAILSAFE`状态。左右互补舵机只在`AIR_ACTIVE`时响应CH10，采用非阻塞斜坡实时跟随旋钮目标，以500 us/s限制最大移动速度；AIR中确认失联后先保持最后位置2秒，短时恢复不会闭合，持续失联超过2秒才回安全位置；主动切换STOP/WATER仍立即回安全位置。
 
 ### 🖥️ 6. 运行时诊断
 
@@ -213,7 +214,7 @@ WATER 模式下，Arduino 将遥控目标与传感器反馈组合为本地控制
 |---|:---:|---|
 | 315 帧解析与 10 路通道恢复 | ✅ 已实现 | 包含 CRC、帧尾、同步和序号诊断 |
 | Arduino → PX4 标准 SBUS | ✅ 已验证 | 已在 QGroundControl / `input_rc` 观察通道 |
-| 200 ms 断联与 PX4 RC Failsafe | ✅ 已验证 | 断联与恢复状态可自动切换 |
+| 350 ms 确认断联与 PX4 RC Failsafe | 🟡 代码完成 | 含150 ms瞬断宽限，尚待断联时序复测 |
 | AIR / STOP / WATER 模式隔离 | ✅ 已实现 | ACTIVE / NEUTRAL / FAILSAFE 状态分离 |
 | 水下 PID 与四水桨混控 | 🟡 已集成 | 尚待整机水下控制测试 |
 | 入水联锁与传感器超时保护 | 🟡 代码完成 | 尚待执行器带载和断联安全验证 |

@@ -15,7 +15,7 @@ const int SERVO_MIRROR_SUM_US = 3000;
 const uint16_t SERVO_SLEW_US_PER_SECOND = 500U;
 const uint16_t SERVO_UPDATE_PERIOD_MS = 20U;
 const uint16_t SERVO_MAX_ELAPSED_MS = 100U;
-const uint16_t SERVO_ENDPOINT_DWELL_MS = 500U;
+const uint32_t SERVO_RX_LOSS_HOLD_MS = 2000UL;
 const uint16_t WATER_CONTROL_PERIOD_MS = 50U;
 
 Servo esc1;
@@ -29,7 +29,6 @@ int servo_output_us = SERVO_SAFE_LEFT_US;
 int servo_motion_target_us = SERVO_SAFE_LEFT_US;
 bool servo_motion_active = false;
 uint32_t servo_last_update_ms = 0;
-uint32_t servo_motion_complete_ms = 0;
 uint32_t water_control_last_update_ms = 0;
 
 void writeNeutralThrusterOutputs() {
@@ -43,7 +42,6 @@ void writeSafeServoOutputs() {
   servo_output_us = SERVO_SAFE_LEFT_US;
   servo_motion_target_us = SERVO_SAFE_LEFT_US;
   servo_motion_active = false;
-  servo_motion_complete_ms = millis();
 
   servo_left.writeMicroseconds(servo_output_us);
   servo_right.writeMicroseconds(
@@ -68,7 +66,6 @@ void actuatorOutputsBegin() {
   writeSafeActuatorOutputs();
 
   servo_last_update_ms = millis();
-  servo_motion_complete_ms = servo_last_update_ms;
   water_control_last_update_ms = servo_last_update_ms;
   Serial.println(F("EVENT,actuators=DISARMED,reason=STARTUP"));
 }
@@ -79,11 +76,24 @@ bool actuatorOutputsArmed() {
 
 void updateServoOutputs(uint32_t now) {
   if (!servoControlCommandAllowed()) {
+    const bool hold_during_air_rx_loss =
+      system_control_state == SYSTEM_STATE_RX_FAILSAFE &&
+      control_mode == CONTROL_MODE_AIR &&
+      rx315LastFrameAgeMs() <= SERVO_RX_LOSS_HOLD_MS;
+
+    if (hold_during_air_rx_loss) {
+      /* Keep the last pulse pair; Servo continues generating those pulses. */
+      servo_last_update_ms = now;
+      return;
+    }
+
     if (servo_output_us != SERVO_SAFE_LEFT_US ||
         servo_motion_target_us != SERVO_SAFE_LEFT_US ||
         servo_motion_active) {
       writeSafeServoOutputs();
     }
+    /* Do not accumulate disabled time into the next slew-rate step. */
+    servo_last_update_ms = now;
     return;
   }
 
@@ -93,18 +103,11 @@ void updateServoOutputs(uint32_t now) {
   }
   servo_last_update_ms = now;
 
-  /* Latch a new command only after the previous complete motion and dwell. */
+  /* Continuously follow the knob while limiting the physical servo speed. */
+  servo_motion_target_us = constrain(angle, 1000, 2000);
+  servo_motion_active = servo_output_us != servo_motion_target_us;
   if (!servo_motion_active) {
-    if (now - servo_motion_complete_ms < SERVO_ENDPOINT_DWELL_MS) {
-      return;
-    }
-
-    const int requested_target = constrain(angle, 1000, 2000);
-    if (requested_target == servo_output_us) {
-      return;
-    }
-    servo_motion_target_us = requested_target;
-    servo_motion_active = true;
+    return;
   }
 
   const uint32_t limited_elapsed =
@@ -130,10 +133,7 @@ void updateServoOutputs(uint32_t now) {
     );
   }
 
-  if (servo_output_us == servo_motion_target_us) {
-    servo_motion_active = false;
-    servo_motion_complete_ms = now;
-  }
+  servo_motion_active = servo_output_us != servo_motion_target_us;
 
   servo_left.writeMicroseconds(servo_output_us);
   servo_right.writeMicroseconds(

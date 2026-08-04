@@ -189,7 +189,7 @@ void updateControlManager(uint32_t now) {
   const uint16_t depth_pwm =
     fresh ? rx315Channel(CONTROL_CH_DEPTH) : 1000U;
   const uint16_t servo_pwm =
-    fresh ? rx315Channel(CONTROL_CH_SERVO) : 1000U;
+    fresh ? rx315Channel(CONTROL_CH_SERVO) : (uint16_t)angle;
 
   yaw_315 = controlApplyStickDeadband(yaw_pwm);
   pitch_315 = controlApplyStickDeadband(surge_pwm);
@@ -197,27 +197,29 @@ void updateControlManager(uint32_t now) {
   angle = constrain((int)servo_pwm, 1000, 2000);
   depth_control_enabled = false;
 
-  const ControlMode requested_mode =
-    controlDecodeMode(fresh, mode_pwm);
-  const bool mode_changed =
-    !control_manager_initialized || requested_mode != control_mode;
+  /* A lost link is a failsafe state, not an artificial STOP command. */
+  if (fresh) {
+    const ControlMode requested_mode = controlDecodeMode(true, mode_pwm);
+    const bool mode_changed =
+      !control_manager_initialized || requested_mode != control_mode;
 
-  if (mode_changed) {
-    const bool had_previous_mode = control_manager_initialized;
-    const ControlMode previous_mode = control_mode;
-    control_mode = requested_mode;
-    control_manager_initialized = true;
-    water_mode_entry_allowed =
-      control_mode == CONTROL_MODE_WATER &&
-      had_previous_mode &&
-      previous_mode == CONTROL_MODE_STOP &&
-      fresh_stop_observed;
-    if (control_mode == CONTROL_MODE_WATER) {
-      fresh_stop_observed = false;
+    if (mode_changed) {
+      const bool had_previous_mode = control_manager_initialized;
+      const ControlMode previous_mode = control_mode;
+      control_mode = requested_mode;
+      control_manager_initialized = true;
+      water_mode_entry_allowed =
+        control_mode == CONTROL_MODE_WATER &&
+        had_previous_mode &&
+        previous_mode == CONTROL_MODE_STOP &&
+        fresh_stop_observed;
+      if (control_mode == CONTROL_MODE_WATER) {
+        fresh_stop_observed = false;
+      }
+      water_rearm_ready = water_mode_entry_allowed;
+      resetWaterControllerState();
+      controlPrintMode(fresh, mode_pwm);
     }
-    water_rearm_ready = water_mode_entry_allowed;
-    resetWaterControllerState();
-    controlPrintMode(fresh, mode_pwm);
   }
 
   if (!fresh) {

@@ -13,8 +13,15 @@
  */
 
 const uint32_t RX315_BAUD = 9600UL;
-const uint32_t RX315_FRESH_TIMEOUT_MS = 200UL;
+const uint32_t RX315_NORMAL_FRAME_GAP_MS = 200UL;
+const uint32_t RX315_TRANSIENT_GRACE_MS = 150UL;
+const uint32_t RX315_FAILSAFE_TIMEOUT_MS =
+  RX315_NORMAL_FRAME_GAP_MS + RX315_TRANSIENT_GRACE_MS;
 const uint8_t RX315_CHANNEL_COUNT = 10;
+const uint8_t RX315_SURGE_CHANNEL = 1;
+const uint16_t RX315_SURGE_INPUT_MIN = 1126U;
+const uint16_t RX315_SURGE_INPUT_MID = 1621U;
+const uint16_t RX315_SURGE_INPUT_MAX = 2000U;
 
 const uint8_t RX315_WHITEN[12] = {
   0xBD, 0xDB, 0xBD, 0xDB, 0xBD, 0xDB,
@@ -92,6 +99,34 @@ uint16_t rx315Map6BitToPwm(uint16_t value) {
   return (uint16_t)(1000UL + ((uint32_t)value * 1000UL) / 63UL);
 }
 
+uint16_t rx315CalibratePwm(uint16_t value,
+                           uint16_t input_min,
+                           uint16_t input_mid,
+                           uint16_t input_max) {
+  if (value <= input_min) {
+    return 1000U;
+  }
+  if (value >= input_max) {
+    return 2000U;
+  }
+
+  if (value <= input_mid) {
+    const uint16_t input_span = input_mid - input_min;
+    return (uint16_t)(
+      1000UL +
+      ((uint32_t)(value - input_min) * 500UL + input_span / 2U) /
+        input_span
+    );
+  }
+
+  const uint16_t input_span = input_max - input_mid;
+  return (uint16_t)(
+    1500UL +
+    ((uint32_t)(value - input_mid) * 500UL + input_span / 2U) /
+      input_span
+  );
+}
+
 void rx315SetLinkState(bool connected) {
   if (connected == rx315_link_connected) {
     return;
@@ -143,6 +178,14 @@ void rx315DecodeData(const uint8_t *wire_data) {
   for (uint8_t i = 4; i < RX315_CHANNEL_COUNT; ++i) {
     rx315_pwm_channel[i] = rx315Map6BitToPwm(rx315_raw_channel[i]);
   }
+
+  /* Compensate the handset's shifted and upper-clipped SURGE channel. */
+  rx315_pwm_channel[RX315_SURGE_CHANNEL] = rx315CalibratePwm(
+    rx315_pwm_channel[RX315_SURGE_CHANNEL],
+    RX315_SURGE_INPUT_MIN,
+    RX315_SURGE_INPUT_MID,
+    RX315_SURGE_INPUT_MAX
+  );
 
   const uint16_t new_sequence =
     (uint16_t)rx315ExtractBits(data, 80, 11);
@@ -237,6 +280,12 @@ void rx315ConsumeByte(uint8_t value) {
 void rx315Begin() {
   Serial3.begin(RX315_BAUD);
   Serial.println(F("RX315_BEGIN,baud=9600,format=8N1,D15=RX3"));
+  Serial.println(
+    F("RX315_BEGIN,normal_gap_ms=200,grace_ms=150,failsafe_ms=350")
+  );
+  Serial.println(
+    F("RX315_BEGIN,surge_calibration=1126:1621:2000->1000:1500:2000")
+  );
   Serial.println(F("RX315_BEGIN,receive/decode only; no motors or PX4 TX"));
 }
 
@@ -246,7 +295,8 @@ void rx315Update() {
   }
 
   // Receiver noise may continue after the handset is turned off. Only a
-  // recently validated frame keeps the link in the connected state.
+  // recently validated frame keeps the link in the connected state. A short
+  // grace interval filters momentary gaps without resetting the control state.
   if (!rx315HasFreshFrame()) {
     rx315SetLinkState(false);
   }
@@ -269,7 +319,7 @@ uint16_t rx315RawChannel(uint8_t index) {
 
 bool rx315HasFreshFrame() {
   return rx315_has_valid_frame &&
-         (millis() - rx315_last_valid_ms <= RX315_FRESH_TIMEOUT_MS);
+         (millis() - rx315_last_valid_ms <= RX315_FAILSAFE_TIMEOUT_MS);
 }
 
 uint32_t rx315LastFrameAgeMs() {
