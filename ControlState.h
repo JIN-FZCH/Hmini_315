@@ -10,6 +10,14 @@ enum ControlMode : uint8_t {
   CONTROL_MODE_WATER
 };
 
+enum SystemControlState : uint8_t {
+  SYSTEM_STATE_RX_FAILSAFE,
+  SYSTEM_STATE_STOP_SAFE,
+  SYSTEM_STATE_AIR_ACTIVE,
+  SYSTEM_STATE_WATER_LOCKED,
+  SYSTEM_STATE_WATER_ACTIVE
+};
+
 enum SbusOutputState : uint8_t {
   SBUS_OUTPUT_ACTIVE,
   SBUS_OUTPUT_NEUTRAL,
@@ -17,9 +25,7 @@ enum SbusOutputState : uint8_t {
 };
 
 extern ControlMode control_mode;
-extern bool water_entry_safe;
-extern bool water_control_unlocked;
-extern bool actuator_outputs_armed;
+extern SystemControlState system_control_state;
 extern bool depth_control_enabled;
 extern int servo_output_us;
 extern int servo_motion_target_us;
@@ -44,13 +50,21 @@ extern int yaw_315;
 extern int pitch_315;
 extern int angle;
 
-void updateControlState();
+void updateControlManager(uint32_t now);
 bool controlModeAllowsSbus();
 bool waterControlCommandAllowed();
-void invalidateWaterControl(const char *reason);
+bool servoControlCommandAllowed();
 void resetWaterControllerState();
 void Marine_Remote_315();
 const char *controlModeName(ControlMode mode);
+const char *systemControlStateName(SystemControlState state);
+const char *systemControlStateReason();
+
+void actuatorOutputsBegin();
+void updateActuatorOutputs(uint32_t now);
+void writeNeutralThrusterOutputs();
+void writeSafeServoOutputs();
+void writeSafeActuatorOutputs();
 
 void serialConsoleUpdate();
 void serialPrintStatus();
@@ -65,9 +79,6 @@ void sbusOutputUpdate();
 bool imuDataFresh(uint32_t now);
 bool depthDataFresh(uint32_t now);
 bool actuatorOutputsArmed();
-void armActuatorOutputs(const char *reason);
-void disarmActuatorOutputs(const char *reason);
-void enforceActuatorOutputSafety(uint32_t now);
 void TD(float *x, float u);
 float fst(float *x, float u, float r, float h);
 float sgn(float x);

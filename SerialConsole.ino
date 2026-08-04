@@ -40,11 +40,15 @@ void serialPrintStatus() {
   serialPrintFrameAge();
   Serial.print(F(",mode="));
   Serial.print(controlModeName(control_mode));
+  Serial.print(F(",state="));
+  Serial.print(systemControlStateName(system_control_state));
+  Serial.print(F(",reason="));
+  Serial.print(systemControlStateReason());
   Serial.print(F(",sbus="));
   Serial.print(sbusOutputStateName());
   Serial.print(F(",water="));
   Serial.print(
-    water_control_unlocked ? F("UNLOCKED") : F("LOCKED")
+    waterControlCommandAllowed() ? F("UNLOCKED") : F("LOCKED")
   );
   Serial.print(F(",actuators="));
   Serial.print(
@@ -122,7 +126,7 @@ void serialPrintChannels() {
   Serial.print(servo_motion_active ? 1 : 0);
   Serial.print(F(",WATER="));
   Serial.print(
-    water_control_unlocked ? F("UNLOCKED") : F("LOCKED")
+    waterControlCommandAllowed() ? F("UNLOCKED") : F("LOCKED")
   );
   Serial.print(F(",ACTUATORS="));
   Serial.print(

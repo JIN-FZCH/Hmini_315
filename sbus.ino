@@ -168,14 +168,12 @@ const char *sbusOutputStateName() {
 
 const char *sbusOutputStateReason(SbusOutputState state) {
   if (state == SBUS_OUTPUT_FAILSAFE) {
-    return "RX_LOST";
+    return systemControlStateReason();
   }
   if (state == SBUS_OUTPUT_ACTIVE) {
     return "AIR_MODE";
   }
-  return control_mode == CONTROL_MODE_WATER
-           ? "WATER_MODE"
-           : "STOP_MODE";
+  return systemControlStateName(system_control_state);
 }
 
 void sbusPrintStateEvent(SbusOutputState state) {
@@ -209,7 +207,7 @@ void sbusOutputUpdate() {
    * receiver loss still sets both SBUS loss flags.
    */
   SbusOutputState next_state;
-  if (!rx315HasFreshFrame()) {
+  if (system_control_state == SYSTEM_STATE_RX_FAILSAFE) {
     next_state = SBUS_OUTPUT_FAILSAFE;
   } else if (controlModeAllowsSbus()) {
     next_state = SBUS_OUTPUT_ACTIVE;

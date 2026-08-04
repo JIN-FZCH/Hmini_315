@@ -16,8 +16,8 @@
 
 Hmini 315 面向同时具备空中与水下执行机构的两栖平台。系统使用同一套 315 MHz 遥控输入，在 Arduino 上完成协议解析、模式管理和安全隔离，并根据当前工作域选择不同的控制路径：
 
-- **AIR**：Arduino 将实时遥控通道转换为标准 SBUS，由 PX4 完成飞行控制；
-- **WATER**：Arduino 融合 IMU 与深度数据，直接控制四路水桨和两路舵机；
+- **AIR**：Arduino 将实时遥控通道转换为标准 SBUS，由 PX4 完成飞行控制，同时允许 CH10 控制本地舵机；
+- **WATER**：Arduino 融合 IMU 与深度数据，直接控制四路水桨，舵机保持安全位置；
 - **STOP**：隔离实时控制指令，使本地执行器和 PX4 输入进入定义明确的安全状态。
 
 这个项目的核心并不是简单转发遥控数据，而是在资源受限的 AVR 平台上，将私有无线协议、标准飞控接口、水下闭环控制、模式状态机和失控保护整合为一条可诊断的控制链路。
@@ -37,7 +37,8 @@ flowchart LR
     A["🎮 315 MHz 遥控手柄"] --> B["📡 315 接收器"]
     B -->|"自定义 UART<br/>9600 baud · 8N1"| C["🧠 Arduino Mega 2560"]
 
-    C -->|"WATER<br/>本地闭环控制"| W["🌊 水下执行器<br/>4 路水桨 · 2 路舵机"]
+    C -->|"WATER<br/>本地闭环控制"| W["🌊 水下执行器<br/>4 路水桨"]
+    C -->|"AIR · CH10"| S["⚙️ 本地互补舵机"]
     C -->|"AIR<br/>标准 SBUS · 100000 baud · 8E2"| D["🧭 PX4"]
     D --> F["✈️ 空中执行器"]
 
@@ -132,7 +133,7 @@ flowchart LR
     R{"315 有效帧<br/>≤ 200 ms?"}
     R -->|"否"| F["FAILSAFE<br/>本地安全输出<br/>SBUS 失控位置位"]
     R -->|"是"| M{"CH7 模式"}
-    M -->|"AIR"| A["本地安全输出<br/>实时 SBUS"]
+    M -->|"AIR"| A["推进器安全输出<br/>CH10舵机 · 实时SBUS"]
     M -->|"STOP"| S["本地安全输出<br/>中立 SBUS"]
     M -->|"WATER"| G{"首次解锁条件<br/>摇杆安全 + 传感器新鲜?"}
     G -->|"否"| WL["WATER LOCKED<br/>本地安全输出"]
@@ -148,13 +149,13 @@ flowchart LR
     style WA fill:#dcfce7,stroke:#22c55e,color:#1f2937
 ```
 
-| 状态 | Arduino 本地执行器 | PX4 接收内容 | SBUS 状态 |
-|---|---|---|---|
-| AIR | 安全输出 | 实时 CH1～CH10 | `ACTIVE` |
-| STOP | 安全输出 | 姿态回中、油门与 AUX 置低 | `NEUTRAL` |
-| WATER（未解锁） | 安全输出 | 姿态回中、油门与 AUX 置低 | `NEUTRAL` |
-| WATER（已解锁） | 本地闭环控制 | 姿态回中、油门与 AUX 置低 | `NEUTRAL` |
-| 315 断联 | 安全输出并重新锁定 | 安全通道值 | `FAILSAFE` |
+| 状态 | 推进器 | 本地舵机 | PX4 接收内容 | SBUS 状态 |
+|---|---|---|---|---|
+| AIR | 安全输出 | CH10控制 | 实时 CH1～CH10 | `ACTIVE` |
+| STOP | 安全输出 | 安全位置 | 姿态回中、油门与 AUX 置低 | `NEUTRAL` |
+| WATER（未解锁） | 安全输出 | 安全位置 | 姿态回中、油门与 AUX 置低 | `NEUTRAL` |
+| WATER（已解锁） | 本地闭环控制 | 安全位置 | 姿态回中、油门与 AUX 置低 | `NEUTRAL` |
+| 315 断联 | 安全输出并重新锁定 | 安全位置 | 安全通道值 | `FAILSAFE` |
 
 这里将“主动模式隔离”和“真实无线链路失效”明确分开：STOP/WATER 仍发送 `lost_frame=false`、`failsafe=false` 的有效安全中立帧，只有 315 链路超过 200 ms 无有效帧时才同时置位两个失控标志。
 
@@ -173,14 +174,14 @@ WATER 模式下，Arduino 将遥控目标与传感器反馈组合为本地控制
 
 ### 🔒 5. 执行器安全联锁
 
-本地执行器总锁每次上电均从 `DISARMED` 开始。进入 WATER 后，只有满足以下条件才自动启用：
+系统每次上电均从 `RX_FAILSAFE` 开始。只有先进入STOP，再切换到WATER，并满足以下条件时才进入`WATER_ACTIVE`：
 
 - CH1、CH2 位于 1470～1530；
 - CH3 ≤1050，垂直桨处于停机区；
 - 315 数据有效；
 - IMU 和深度数据均新鲜。
 
-315 失联、切换到 STOP/AIR、IMU 超时或深度超时都会立即恢复安全输出并撤销解锁。左右互补舵机采用非阻塞斜坡和端点动作锁存，以 500 us/s 移动；运动中忽略目标反向，到位后停留 500 ms 再接受下一次动作。
+315 失联、切换到 STOP/AIR、IMU 超时或深度超时都会立即让推进器恢复安全输出并撤销WATER权限。左右互补舵机只在`AIR_ACTIVE`时响应CH10，采用非阻塞斜坡和端点动作锁存，以500 us/s移动；STOP、WATER或失联时立即回安全位置。
 
 ### 🖥️ 6. 运行时诊断
 
@@ -222,11 +223,13 @@ WATER 模式下，Arduino 将遥控目标与传感器反馈组合为本地控制
 
 ```text
 Hmini_315/
-├─ Hmini_315.ino                  集成层：外设初始化、主循环调度与执行器总锁
-├─ ControlState.h                 接口层：模式、状态和跨模块控制接口
+├─ Hmini_315.ino                  集成层：外设初始化、传感器刷新与主循环调度
+├─ ControlState.h                 接口层：系统状态和跨模块控制接口
+├─ ControlManager.ino             策略层：模式状态机、入水联锁和统一权限判定
+├─ ActuatorOutputs.ino            输出层：推进器安全输出与 AIR 舵机控制
+├─ WaterController.ino            控制层：水下闭环控制和四推进器混控
 ├─ RX315.ino                      接收层：帧同步、CRC、解扰和通道解析
 ├─ sbus.ino                       输出层：SBUS 编码、PX4 数值补偿和 Failsafe
-├─ WaterControl315.ino            控制层：模式状态机、入水联锁和水下混控
 ├─ YawCtrl.ino                    算法层：PID 与跟踪微分器
 ├─ SerialConsole.ino              诊断层：事件、状态、通道和链路监视
 ├─ imu_data_decode.* / packet.*   驱动层：IMU 串口协议解析
@@ -237,7 +240,7 @@ Hmini_315/
 └─ docs/                          使用、协议和代码架构文档
 ```
 
-主程序按“接收 → 模式更新 → SBUS 输出 → 传感器更新 → 安全检查 → 水下控制”的顺序运行，各模块通过 `ControlState.h` 暴露的接口协作，避免接收解析、输出协议和执行器逻辑相互耦合。
+主程序按“接收 → 传感器更新 → 中央状态机 → SBUS 输出 → 执行器输出”的顺序运行。`ControlManager.ino` 是唯一的最终权限判定点，SBUS 和执行器模块只消费 `RX_FAILSAFE / STOP_SAFE / AIR_ACTIVE / WATER_LOCKED / WATER_ACTIVE` 状态，不再分别重建安全条件。
 
 ## 🚧 当前边界与后续计划
 
