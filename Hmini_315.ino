@@ -12,6 +12,8 @@
  */
 #define RX315_BENCH_TEST_ONLY 0
 
+const char FIRMWARE_BUILD_ID[] = "HMINI315_20260806_01";
+
 const float DEPTH_ZERO_DEADBAND_M = 0.03f;
 
 MS5837 sensor;
@@ -60,6 +62,11 @@ bool depthDataFresh(uint32_t now) {
 
 void setup() {
   Serial.begin(115200);
+  Serial.print(F("FIRMWARE,id="));
+  Serial.println(FIRMWARE_BUILD_ID);
+  Serial.println(
+    F("FIRMWARE,features=RX350,MODE_KEEP,SERVO_HOLD_2000,SURGE_CAL")
+  );
   rx315Begin();
   sbusOutputBegin();
   Serial.println(F("CONSOLE_READY,type=help"));
